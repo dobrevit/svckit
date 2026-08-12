@@ -73,7 +73,8 @@ release notes are accurate.
 
 Contributions require a signed CLA — see [CLA.md](CLA.md). The bot will prompt
 you on your first pull request; you sign once and subsequent contributions are
-covered.
+covered. (Maintainers: the check stays dormant until the signature store is
+configured — see [.github/CLA-SETUP.md](.github/CLA-SETUP.md).)
 
 If your employer owns the rights to your work, arrange that before signing.
 

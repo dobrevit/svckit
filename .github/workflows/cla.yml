@@ -11,27 +11,39 @@ permissions:
 
 jobs:
   cla:
+    # Bots hold no copyright and cannot agree to anything, so a CLA gate on
+    # their pull requests is meaningless — and it would block automated
+    # dependency updates from ever merging.
+    if: >-
+      !endsWith(github.actor, '[bot]') &&
+      (github.event_name == 'pull_request_target' ||
+       (github.event.issue.pull_request != null &&
+        github.event.comment.body == 'I have read the CLA document and I hereby sign the CLA'))
     runs-on: ubuntu-latest
     permissions:
       actions: write
       contents: read       # signatures live in a separate repository
       pull-requests: write
       statuses: write
+    env:
+      # The secrets context is not available to a job-level `if`, so the
+      # configured/unconfigured decision is made per step below.
+      SIGNATURES_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
     steps:
       - name: Check the CLA
-        if: (github.event.comment.body == 'I have read the CLA document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        if: env.SIGNATURES_TOKEN != ''
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # A fine-grained PAT with contents:write on the signatures
           # repository. Kept out of this repo so a contributor cannot alter
           # the signature record through a pull request.
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ env.SIGNATURES_TOKEN }}
         with:
           path-to-signatures: signatures/version1/cla.json
           path-to-document: https://github.com/dobrevit/svckit/blob/main/CLA.md
           branch: main
-          allowlist: dependabot[bot],dobrevit
+          allowlist: dobrevit
           remote-organization-name: dobrevit
           remote-repository-name: cla-signatures
           custom-notsigned-prcomment: |
@@ -40,3 +52,10 @@ jobs:
             sign it by posting a comment on this PR containing exactly:
           custom-pr-sign-comment: "I have read the CLA document and I hereby sign the CLA"
           custom-allsigned-prcomment: "All contributors have signed the CLA. Thanks!"
+
+      # Without this, an unconfigured CLA check fails every pull request,
+      # which trains everyone to ignore a red cross.
+      - name: Report that the CLA check is not configured
+        if: env.SIGNATURES_TOKEN == ''
+        run: |
+          echo "::notice title=CLA check skipped::CLA_SIGNATURES_TOKEN is not set, so signatures cannot be recorded. See .github/CLA-SETUP.md."
