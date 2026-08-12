@@ -8,8 +8,8 @@ import (
 
 // Cached wraps a Store with a per-path TTL cache so consumers can read
 // secrets at call time instead of once at startup. The TTL is the upper
-// bound on how long a rotated-out value keeps being used, and must stay
-// below the IAM rotation grace window (see the architecture doc, §7).
+// bound on how long a rotated-out value keeps being used, so it must stay
+// below whatever grace period the issuing system allows after a rotation.
 // Misses are not cached: a secret that is not there yet (bootstrap
 // ordering) must stay retryable.
 func Cached(inner Store, ttl time.Duration) Store {

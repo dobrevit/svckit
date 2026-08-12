@@ -1,11 +1,12 @@
-// Package secrets provides a backend-agnostic secret store abstraction for
-// the platform, as designed in docs/architecture/SECRETS-MANAGEMENT-ARCHITECTURE.md.
+// Package secrets resolves secrets by logical path, independently of where
+// they are stored.
 //
-// Consumers resolve secrets by logical path (e.g. "service-keys/billing")
-// through the Store interface; the backend (env, Vault, Kubernetes Secrets) is
-// selected at startup via the SECRETS_BACKEND environment variable. Phase 0
-// ships the env backend only, so behavior is identical to reading environment
-// variables directly.
+// Consumers ask for a path such as "service-keys/billing" through the Store
+// interface; the backend — environment variables, Vault, or Kubernetes
+// Secrets — is chosen at startup from SECRETS_BACKEND. Swapping backends is a
+// deployment decision, not a code change, and the env backend behaves exactly
+// like reading the variable directly, so a service can start there and move
+// later.
 package secrets
 
 import (
@@ -60,10 +61,14 @@ func ServiceKeyPath(serviceName string) string {
 	return "service-keys/" + serviceName
 }
 
-// Well-known logical paths for platform key material (phase 4). The IAM
-// seeder adopts these from env into the store; it never generates them - a
-// generated KMS master key would orphan everything encrypted under the real
-// one.
+// Well-known logical paths for the key material an infrastructure deployment
+// usually shares. They are conventions, not requirements: any string is a
+// valid path, and a deployment that names things differently just passes its
+// own.
+//
+// A seeder should adopt these values from the environment rather than
+// generate them. Generating a master key would orphan everything already
+// encrypted under the real one.
 const (
 	KMSMasterKeyPath    = "kms/master-key"
 	EventSigningKeyPath = "kms/event-signing-key"

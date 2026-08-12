@@ -27,7 +27,7 @@ const (
 // using the pod's ServiceAccount - plain HTTP like the Vault backend, so the
 // vendored service modules stay free of client-go's dependency tree.
 //
-// Logical paths map to Secrets per the architecture doc §4:
+// Logical paths map onto Secret names and data keys like this:
 //
 //	service-keys/<svc> -> Secret "svc-key-<svc>", key "api-key"
 //	kms/<material>     -> Secret "kms-material",  key "<material>"
@@ -102,7 +102,7 @@ func NewKubernetesStoreFromEnv() (*KubernetesStore, error) {
 	return &KubernetesStore{apiURL: strings.TrimSuffix(apiURL, "/"), namespace: namespace, token: token, client: client}, nil
 }
 
-// locate maps a logical path onto a Secret name and data key (design doc §4).
+// locate maps a logical path onto a Secret name and data key.
 func (k *KubernetesStore) locate(path string) (secretName, key string) {
 	switch {
 	case strings.HasPrefix(path, "service-keys/"):
@@ -167,7 +167,8 @@ func (k *KubernetesStore) Get(ctx context.Context, path string) (string, error) 
 		return "", fmt.Errorf("kubernetes: secret %q key %q is not valid base64: %v", secretName, key, err)
 	}
 	if len(value) == 0 {
-		// Empty value = tombstone (revocation §7.1).
+		// An empty value is a tombstone: the secret was revoked, which is
+		// distinct from it never having existed.
 		return "", fmt.Errorf("kubernetes: secret %q key %q is empty: %w", secretName, key, ErrNotFound)
 	}
 	return string(value), nil

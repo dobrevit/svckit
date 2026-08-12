@@ -8,6 +8,15 @@ releases.
 
 ## [Unreleased]
 
+### Changed
+
+- `secrets` doc comments no longer cite sections of an architecture document
+  that does not exist in this repository ("per the architecture doc §4", "see
+  §7", "docs/architecture/SECRETS-MANAGEMENT-ARCHITECTURE.md"). They now say
+  what they mean. The well-known path constants are documented as conventions
+  a caller may ignore rather than as fixed platform paths; their values are
+  unchanged, since they are a storage contract.
+
 ## [0.1.1] - 2026-08-12
 
 **First published release.** The toolkit was extracted from a 17-service
