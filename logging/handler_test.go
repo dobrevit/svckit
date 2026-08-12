@@ -89,3 +89,20 @@ func TestWithAttrsPersist(t *testing.T) {
 		t.Errorf("output %q missing persistent attr", buf.String())
 	}
 }
+
+// The base filename alone cannot distinguish middleware/logging.go from
+// logging/logging.go, which made every HTTP access log look as though the
+// logging package were attributing entries to itself.
+func TestCallerNamesThePackageDirectory(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(logging.NewHandler(logging.Options{
+		Service: "orders", Writer: &buf, Level: slog.LevelDebug,
+	}))
+
+	logger.Info("from the test file")
+
+	got := buf.String()
+	if !strings.Contains(got, "logging/handler_test.go:") {
+		t.Errorf("caller = %q, want it qualified with the package directory", got)
+	}
+}

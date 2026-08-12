@@ -10,6 +10,14 @@ releases.
 
 ### Changed
 
+- The caller in a log line is now qualified with its package directory
+  (`middleware/logging.go:32` rather than `logging.go:32`). The base name alone
+  could not distinguish `middleware/logging.go` from `logging/logging.go`, so
+  every HTTP access log appeared to be attributed to the logging package
+  itself. Attribution was always correct; only the rendering was ambiguous.
+  Anything parsing the human-readable format for a bare filename needs
+  adjusting — the JSON handler is unaffected.
+
 - `secrets` doc comments no longer cite sections of an architecture document
   that does not exist in this repository ("per the architecture doc §4", "see
   §7", "docs/architecture/SECRETS-MANAGEMENT-ARCHITECTURE.md"). They now say

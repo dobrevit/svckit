@@ -89,8 +89,7 @@ func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 	if r.PC != 0 {
 		frame, _ := runtime.CallersFrames([]uintptr{r.PC}).Next()
 		if frame.File != "" {
-			parts := strings.Split(frame.File, "/")
-			caller = fmt.Sprintf("%s:%d", parts[len(parts)-1], frame.Line)
+			caller = fmt.Sprintf("%s:%d", shortPath(frame.File), frame.Line)
 		}
 	}
 
@@ -168,4 +167,18 @@ func levelColor(l slog.Level) string {
 	default:
 		return "\033[31m" // Red
 	}
+}
+
+// shortPath renders a source file as "package/file.go".
+//
+// The base name alone is ambiguous: middleware/logging.go and
+// logging/logging.go both print as "logging.go", which makes every access log
+// look as though the logging package were attributing entries to itself. One
+// parent segment is enough to tell them apart and still fits on a line.
+func shortPath(file string) string {
+	parts := strings.Split(file, "/")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	return parts[len(parts)-1]
 }
