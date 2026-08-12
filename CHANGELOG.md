@@ -10,6 +10,15 @@ releases.
 
 ### Changed
 
+- **Successful requests to the operational endpoints are logged at debug
+  instead of info.** Under an orchestrator, liveness and readiness probes are
+  the bulk of a service's log volume and none of its information. A probe that
+  *fails* stays at info: a readiness check that starts flapping is precisely
+  what you want to see, and the worst thing to have silenced. Covers
+  `/health`, `/healthz`, `/ready`, `/readyz`, `/live`, `/livez`, `/metrics`
+  and the profiling routes; override with `RequestLoggingWith` and a `Quiet`
+  function.
+
 - The caller in a log line is now qualified with its package directory
   (`middleware/logging.go:32` rather than `logging.go:32`). The base name alone
   could not distinguish `middleware/logging.go` from `logging/logging.go`, so

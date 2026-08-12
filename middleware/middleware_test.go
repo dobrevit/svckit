@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -374,5 +375,85 @@ func TestRecorderCapturesStatusForMetrics(t *testing.T) {
 
 	if w.Code != http.StatusTeapot {
 		t.Errorf("status = %d, want %d — the recorder swallowed the handler's status", w.Code, http.StatusTeapot)
+	}
+}
+
+// logAt captures what the request logger emits at the given level.
+func logAt(t *testing.T, level slog.Level, mw func(http.Handler) http.Handler, path string, status int) string {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	return buf.String()
+}
+
+// Under an orchestrator, probes are the bulk of a service's log volume and
+// none of its information.
+func TestSuccessfulProbesAreQuietAtInfo(t *testing.T) {
+	mw := middleware.RequestLogging("orders")
+
+	for _, path := range []string{"/health", "/ready", "/metrics", "/debug/pprof/heap"} {
+		t.Run(path, func(t *testing.T) {
+			if got := logAt(t, slog.LevelInfo, mw, path, http.StatusOK); got != "" {
+				t.Errorf("a successful probe was logged at info: %q", got)
+			}
+		})
+	}
+}
+
+// Nothing is lost — the lines come back when someone asks for them.
+func TestQuietedProbesStillAppearAtDebug(t *testing.T) {
+	mw := middleware.RequestLogging("orders")
+
+	if got := logAt(t, slog.LevelDebug, mw, "/health", http.StatusOK); !strings.Contains(got, "/health") {
+		t.Errorf("a probe did not appear at debug level: %q", got)
+	}
+}
+
+// A readiness check that starts flapping is the worst possible thing to have
+// silenced.
+func TestFailingProbesStayAtInfo(t *testing.T) {
+	mw := middleware.RequestLogging("orders")
+
+	got := logAt(t, slog.LevelInfo, mw, "/ready", http.StatusServiceUnavailable)
+	if !strings.Contains(got, "/ready") {
+		t.Errorf("a failing readiness probe was silenced: %q", got)
+	}
+}
+
+func TestOrdinaryRequestsAreUnaffected(t *testing.T) {
+	mw := middleware.RequestLogging("orders")
+
+	if got := logAt(t, slog.LevelInfo, mw, "/api/v1/orders", http.StatusOK); !strings.Contains(got, "/api/v1/orders") {
+		t.Errorf("an ordinary request was not logged at info: %q", got)
+	}
+}
+
+// The default is an opinion, so it has to be overridable.
+func TestQuietCanBeDisabled(t *testing.T) {
+	mw := middleware.RequestLoggingWith(middleware.LoggingOptions{
+		ServiceName: "orders",
+		Quiet:       func(*http.Request, int) bool { return false },
+	})
+
+	if got := logAt(t, slog.LevelInfo, mw, "/health", http.StatusOK); !strings.Contains(got, "/health") {
+		t.Errorf("Quiet override was ignored: %q", got)
+	}
+}
+
+func TestIsOperationalPath(t *testing.T) {
+	for _, path := range []string{"/health", "/healthz", "/ready", "/readyz", "/live", "/livez", "/metrics", "/debug/pprof/", "/debug/pprof/goroutine"} {
+		if !middleware.IsOperationalPath(path) {
+			t.Errorf("IsOperationalPath(%q) = false, want true", path)
+		}
+	}
+	for _, path := range []string{"/", "/api/v1/orders", "/healthcheck-report", "/readyverse"} {
+		if middleware.IsOperationalPath(path) {
+			t.Errorf("IsOperationalPath(%q) = true, want false", path)
+		}
 	}
 }
