@@ -127,6 +127,17 @@ or `RABBITMQ_TEST_URL`.
 names and shapes are not yet frozen; that happens at v1.0.0. Changes are
 recorded in [CHANGELOG.md](CHANGELOG.md).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the design stance
+that shapes review feedback. Contributions require a signed
+[CLA](CLA.md); the bot prompts you on your first pull request.
+
+## Security
+
+Please report vulnerabilities privately rather than through an issue —
+[SECURITY.md](SECURITY.md) has the process and what to expect.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).

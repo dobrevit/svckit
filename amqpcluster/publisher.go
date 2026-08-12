@@ -49,7 +49,7 @@ func NewClusterPublisher(nodes []string, serviceName string, signingConfig *even
 
 	// Setup exchange on all nodes
 	if err := publisher.setupInfrastructure(); err != nil {
-		cluster.Close()
+		_ = cluster.Close() // returning the setup failure, not this one
 		return nil, fmt.Errorf("failed to setup infrastructure: %w", err)
 	}
 

@@ -1,0 +1,62 @@
+version: 2
+
+updates:
+  # Main module.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for the routine patch churn; anything larger arrives on its own
+      # so it gets looked at properly.
+      go-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+      # Security fixes are never grouped or delayed.
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # testkit is a separate module with its own dependency graph.
+  - package-ecosystem: gomod
+    directory: "/testkit"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - testkit
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      testkit-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"

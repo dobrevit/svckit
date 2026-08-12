@@ -116,7 +116,7 @@ func VerifyEvent(signedEvent *SignedEvent, config *SignatureConfig) error {
 	}
 
 	if !hmac.Equal([]byte(signedEvent.Signature), []byte(expectedSignature)) {
-		return fmt.Errorf("invalid signature - expected: %.10s..., got: %.10s...", expectedSignature, signedEvent.Signature)
+		return fmt.Errorf("invalid signature: expected %.10s, got %.10s", expectedSignature, signedEvent.Signature)
 	}
 
 	return nil

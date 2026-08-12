@@ -191,7 +191,7 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 		if r := recover(); r != nil {
 			logging.Error("Panic while handling message: %v", r)
 			if !autoAck {
-				delivery.Nack(false, false) // Send to DLQ on panic
+				nack(delivery, false) // Send to DLQ on panic
 			}
 		}
 	}()
@@ -217,9 +217,9 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 		logging.Error("Failed to parse message: %v", err)
 		if !autoAck {
 			if cs.isRetryableError(err) {
-				delivery.Nack(false, true) // Requeue for retry
+				nack(delivery, true) // Requeue for retry
 			} else {
-				delivery.Nack(false, false) // Send to DLQ
+				nack(delivery, false) // Send to DLQ
 			}
 		}
 		return
@@ -229,7 +229,7 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 	ctx := context.Background()
 	if userID, ok := delivery.Headers["user_id"]; ok {
 		if userIDStr, ok := userID.(string); ok && userIDStr != "" {
-			ctx = context.WithValue(ctx, "user_id", userIDStr)
+			ctx = eventbus.WithUserID(ctx, userIDStr)
 		}
 	}
 
@@ -238,9 +238,9 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 		logging.Error("Handler failed to process event %s: %v", event.Type, err)
 		if !autoAck {
 			if cs.isRetryableError(err) {
-				delivery.Nack(false, true) // Requeue for retry
+				nack(delivery, true) // Requeue for retry
 			} else {
-				delivery.Nack(false, false) // Send to DLQ
+				nack(delivery, false) // Send to DLQ
 			}
 		}
 		return
@@ -248,9 +248,7 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 
 	// Acknowledge successful processing
 	if !autoAck {
-		if err := delivery.Ack(false); err != nil {
-			logging.Error("Failed to acknowledge message: %v", err)
-		}
+		ack(delivery)
 	}
 }
 
@@ -387,4 +385,21 @@ func (cs *ClusterSubscriber) Close() error {
 		return cs.cluster.Close()
 	}
 	return nil
+}
+
+// ack and nack record the outcome of a delivery and log a failure to do so.
+// A failed acknowledgement is not cosmetic: the broker never learns the
+// message was handled, so it redelivers it, and the duplicate surfaces far
+// from here. Logging is all that can be done — the channel is already in
+// trouble if these fail.
+func ack(delivery amqp.Delivery) {
+	if err := delivery.Ack(false); err != nil {
+		logging.Error("Failed to ack message (it will be redelivered): %v", err)
+	}
+}
+
+func nack(delivery amqp.Delivery, requeue bool) {
+	if err := delivery.Nack(false, requeue); err != nil {
+		logging.Error("Failed to nack message (it will be redelivered): %v", err)
+	}
 }

@@ -18,7 +18,7 @@ func Chain(stores ...Store) Store {
 type chainStore []Store
 
 func (c chainStore) Get(ctx context.Context, path string) (string, error) {
-	var lastErr error = ErrNotFound
+	lastErr := error(ErrNotFound)
 	for _, s := range c {
 		value, err := s.Get(ctx, path)
 		if err == nil {

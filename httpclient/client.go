@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dobrevit/svckit/buildinfo"
@@ -144,7 +143,6 @@ var (
 type HTTPClientMetrics struct {
 	serviceName   string
 	targetService string
-	mutex         sync.Mutex
 }
 
 // NewHTTPClientMetrics creates a new metrics collector
@@ -729,7 +727,7 @@ func (c *Client) doSingleRequest(ctx context.Context, req Request) (*Response, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read response body
 	body, err := io.ReadAll(resp.Body)

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/dobrevit/svckit/logging"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // NodeState represents the health state of a Redis node
@@ -174,7 +174,7 @@ func (ca *ClusterAdapter) connectToNode(node *RedisNode) error {
 
 	// Close existing connection
 	if node.client != nil {
-		node.client.Close()
+		_ = node.client.Close() // replacing this client; nothing to do if it objects
 	}
 
 	// Parse URL and create options
@@ -194,8 +194,12 @@ func (ca *ClusterAdapter) connectToNode(node *RedisNode) error {
 	// Apply connection pool settings
 	opt.PoolSize = ca.config.MaxPoolSize
 	opt.MinIdleConns = ca.config.MinIdleConns
-	opt.MaxConnAge = ca.config.ConnMaxLifetime
-	opt.PoolTimeout = ca.config.MaxIdleTime
+	opt.ConnMaxLifetime = ca.config.ConnMaxLifetime
+	// v8 spelled this MaxConnAge, and MaxIdleTime was being applied to
+	// PoolTimeout -- how long to wait for a free connection, which is a
+	// different thing entirely. v9's ConnMaxIdleTime is what the setting
+	// always meant.
+	opt.ConnMaxIdleTime = ca.config.MaxIdleTime
 	opt.MaxRetries = ca.config.MaxRetries
 
 	// Create client
@@ -207,7 +211,7 @@ func (ca *ClusterAdapter) connectToNode(node *RedisNode) error {
 
 	start := time.Now()
 	if err := client.Ping(ctx).Err(); err != nil {
-		client.Close()
+		_ = client.Close() // discarding a client that cannot reach the server
 		node.state = NodeFailed
 		node.lastError = err
 		node.lastCheck = time.Now()
@@ -299,7 +303,7 @@ func (ca *ClusterAdapter) getFirstHealthyNode() *RedisNode {
 }
 
 // ExecuteWithRetry executes a Redis operation with retry and failover
-func (ca *ClusterAdapter) ExecuteWithRetry(ctx context.Context, fn func(*redis.Client) error, key ...string) error {
+func (ca *ClusterAdapter) ExecuteWithRetry(ctx context.Context, fn func(context.Context, *redis.Client) error, key ...string) error {
 	var nodeKey string
 	if len(key) > 0 {
 		nodeKey = key[0]
@@ -354,11 +358,11 @@ func (ca *ClusterAdapter) ExecuteWithRetry(ctx context.Context, fn func(*redis.C
 		}
 	}
 
-	return fmt.Errorf("Redis operation failed after %d attempts", ca.config.MaxRetries+1)
+	return fmt.Errorf("redis operation failed after %d attempts", ca.config.MaxRetries+1)
 }
 
 // executeOnNode executes an operation on a specific node
-func (ca *ClusterAdapter) executeOnNode(ctx context.Context, node *RedisNode, fn func(*redis.Client) error) error {
+func (ca *ClusterAdapter) executeOnNode(ctx context.Context, node *RedisNode, fn func(context.Context, *redis.Client) error) error {
 	node.mutex.RLock()
 	client := node.client
 	node.mutex.RUnlock()
@@ -371,10 +375,10 @@ func (ca *ClusterAdapter) executeOnNode(ctx context.Context, node *RedisNode, fn
 	execCtx, cancel := context.WithTimeout(ctx, ca.config.HealthCheckTimeout)
 	defer cancel()
 
-	// Wrap the function to use the timeout context
-	err := fn(client.WithContext(execCtx))
-
-	return err
+	// v8 applied the timeout with client.WithContext, which the commands
+	// ignored because each one takes a context of its own. Handing execCtx to
+	// the callback is what makes HealthCheckTimeout actually bound the call.
+	return fn(execCtx, client)
 }
 
 // checkNodeDegradation checks if a node should be marked as degraded
@@ -494,22 +498,26 @@ func (ca *ClusterAdapter) GetNodeByIndex(index int) *RedisNode {
 	return nil
 }
 
-// Close gracefully shuts down all connections
+// Close gracefully shuts down all connections. Every node is closed even if
+// an earlier one failed; the failures are joined into the returned error
+// rather than discarded, which is what this method used to do.
 func (ca *ClusterAdapter) Close() error {
 	// Stop background tasks
 	ca.tombManager.Shutdown()
 
-	// Close all node connections
+	var errs []error
 	for _, node := range ca.nodes {
 		node.mutex.Lock()
 		if node.client != nil {
-			node.client.Close()
+			if err := node.client.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("closing %s: %w", node.Name, err))
+			}
 		}
 		node.mutex.Unlock()
 	}
 
 	logging.Info("Redis cluster adapter closed")
-	return nil
+	return errors.Join(errs...)
 }
 
 // ClusterHealth represents the health status of the cluster

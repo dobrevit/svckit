@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -199,7 +200,7 @@ func (p *Publisher) TestConnection() error {
 	if err != nil {
 		return err
 	}
-	defer testCh.Close()
+	defer func() { _ = testCh.Close() }()
 
 	return nil
 }
@@ -209,13 +210,18 @@ func (p *Publisher) Close() error {
 	// Update connection status
 	UpdateConnectionStatus(p.serviceName, "publisher", false)
 
+	var errs []error
 	if p.channel != nil {
-		p.channel.Close()
+		if err := p.channel.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing channel: %w", err))
+		}
 	}
 	if p.conn != nil {
-		return p.conn.Close()
+		if err := p.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing connection: %w", err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // EventHandler defines the interface for handling events
@@ -361,7 +367,7 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 				defer func() {
 					if r := recover(); r != nil {
 						logging.Error("Panic handling event: %v", r)
-						d.Nack(false, false) // Send to dead letter queue
+						nack(d, false) // Send to dead letter queue
 					}
 				}()
 
@@ -375,7 +381,7 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 					if err := json.Unmarshal(d.Body, &signedEvent); err != nil {
 						logging.Error("Error parsing signed event JSON: %v", err)
 						RecordEventDLQ("unknown", s.serviceName, queueName, "parse_error")
-						d.Nack(false, false)
+						nack(d, false)
 						return
 					}
 
@@ -384,7 +390,7 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 						logging.Error("🚨 SECURITY ALERT: Invalid signature for event %s from %s: %v",
 							signedEvent.Event.Type, signedEvent.Event.Source, err)
 						RecordEventDLQ(signedEvent.Event.Type, s.serviceName, queueName, "invalid_signature")
-						d.Nack(false, false) // Don't requeue security failures
+						nack(d, false) // Don't requeue security failures
 						return
 					}
 
@@ -395,7 +401,7 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 					if s.requireSigning && (!exists || !isSigned) {
 						logging.Error("🚨 SECURITY ALERT: Unsigned event rejected (signing required)")
 						RecordEventDLQ("unknown", s.serviceName, queueName, "unsigned_event_rejected")
-						d.Nack(false, false)
+						nack(d, false)
 						return
 					}
 
@@ -404,7 +410,7 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 					if err != nil {
 						logging.Error("Error parsing event JSON: %v", err)
 						RecordEventDLQ("unknown", s.serviceName, queueName, "parse_error")
-						d.Nack(false, false)
+						nack(d, false)
 						return
 					}
 
@@ -435,11 +441,11 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 					if isRetryableError(err) {
 						RecordEventRequeued(event.Type, s.serviceName, queueName)
 						RecordEventProcessed(event.Type, s.serviceName, queueName, "requeued")
-						d.Nack(false, true) // Requeue for retry
+						nack(d, true) // Requeue for retry
 					} else {
 						RecordEventDLQ(event.Type, s.serviceName, queueName, "processing_error")
 						RecordEventProcessed(event.Type, s.serviceName, queueName, "error")
-						d.Nack(false, false) // Send to dead letter queue
+						nack(d, false) // Send to dead letter queue
 					}
 					return
 				}
@@ -450,7 +456,7 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 				// Successfully processed
 				RecordEventAcknowledged(event.Type, s.serviceName, queueName)
 				RecordEventProcessed(event.Type, s.serviceName, queueName, "success")
-				d.Ack(false)
+				ack(d)
 				logging.Info("Successfully processed event: %s", event.Type)
 			}()
 		}
@@ -488,11 +494,16 @@ func (s *Subscriber) Close() error {
 	// Update connection status
 	UpdateConnectionStatus(s.serviceName, "subscriber", false)
 
+	var errs []error
 	if s.channel != nil {
-		s.channel.Close()
+		if err := s.channel.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing channel: %w", err))
+		}
 	}
 	if s.conn != nil {
-		return s.conn.Close()
+		if err := s.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing connection: %w", err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

@@ -183,7 +183,7 @@ func (a *App) setupDatabase(name string, migrate func(*sql.DB) error) error {
 		return fmt.Errorf("failed to create database cluster manager: %w", err)
 	}
 	a.DBManager = manager
-	a.closers = append(a.closers, func() { manager.Close() })
+	a.closers = append(a.closers, func() { logClose("database cluster", manager.Close) })
 
 	sqlDB, err := manager.Writer()
 	if err != nil {
@@ -222,7 +222,7 @@ func (a *App) setupMessaging(name string, o options) error {
 		} else {
 			a.EventPub = pub
 			a.Health.SetRabbitMQPublisher(pub)
-			a.closers = append(a.closers, func() { pub.Close() })
+			a.closers = append(a.closers, func() { logClose("event publisher", pub.Close) })
 		}
 	}
 
@@ -235,7 +235,7 @@ func (a *App) setupMessaging(name string, o options) error {
 			logging.Warn("Failed to create cluster event subscriber (event consumption disabled): %v", err)
 		} else {
 			a.EventSub = sub
-			a.closers = append(a.closers, func() { sub.Close() })
+			a.closers = append(a.closers, func() { logClose("event subscriber", sub.Close) })
 		}
 	}
 
@@ -340,6 +340,15 @@ func (a *App) Run(handler http.Handler, cleanup ...func() error) {
 	a.Tomb.StartHTTPServer(server, a.Port)
 	logging.Info("🚀 %s starting on port %s", a.Name, a.Port)
 	a.Tomb.WaitForShutdownSignal(server, cleanup...)
+}
+
+// logClose runs a shutdown step and reports a failure. Nothing can be done
+// about it by then -- the process is going away -- but a silent failure at
+// shutdown is how leaked connections go unnoticed.
+func logClose(what string, closeFn func() error) {
+	if err := closeFn(); err != nil {
+		logging.Warn("Failed to close %s cleanly: %v", what, err)
+	}
 }
 
 // Close releases everything New created, in reverse order. Safe to call after

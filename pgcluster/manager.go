@@ -232,7 +232,7 @@ func (cm *ClusterManager) connectToNode(node *DatabaseNode) error {
 
 	// Close existing connection
 	if node.sqlDB != nil {
-		node.sqlDB.Close()
+		_ = node.sqlDB.Close() // replacing this pool; nothing to do if it objects
 	}
 
 	// Open the pool with retry. sql.Open itself only validates arguments, so
@@ -275,7 +275,7 @@ func (cm *ClusterManager) connectToNode(node *DatabaseNode) error {
 	defer cancel()
 
 	if err := sqlDB.PingContext(ctx); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close() // discarding a pool that cannot reach the server
 		node.Health = HealthFailed
 		node.lastError = err
 		return fmt.Errorf("failed to ping %s: %w", node.Name, err)
@@ -496,20 +496,24 @@ func (cm *ClusterManager) openCircuitBreaker() {
 	}
 }
 
-// Close gracefully shuts down all connections
+// Close gracefully shuts down all connections. Every node is closed even if
+// an earlier one failed; the failures are joined into the returned error
+// rather than discarded, which is what this method used to do.
 func (cm *ClusterManager) Close() error {
 	// Stop background tasks
 	cm.tombManager.Shutdown()
 
-	// Close all node connections
+	var errs []error
 	for _, node := range cm.nodes {
 		node.mutex.Lock()
 		if node.sqlDB != nil {
-			node.sqlDB.Close()
+			if err := node.sqlDB.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("closing %s: %w", node.Name, err))
+			}
 		}
 		node.mutex.Unlock()
 	}
 
 	logging.Info("Database cluster manager closed")
-	return nil
+	return errors.Join(errs...)
 }

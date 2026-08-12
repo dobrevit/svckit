@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -42,14 +42,14 @@ func TestClusterAdapter_Integration(t *testing.T) {
 
 	// Test basic operation
 	ctx := context.Background()
-	err = adapter.ExecuteWithRetry(ctx, func(client *redis.Client) error {
+	err = adapter.ExecuteWithRetry(ctx, func(ctx context.Context, client *redis.Client) error {
 		return client.Set(ctx, "test:key", "test-value", time.Minute).Err()
 	}, "test:key")
 	assert.NoError(t, err)
 
 	// Test get operation
 	var value string
-	err = adapter.ExecuteWithRetry(ctx, func(client *redis.Client) error {
+	err = adapter.ExecuteWithRetry(ctx, func(ctx context.Context, client *redis.Client) error {
 		result := client.Get(ctx, "test:key")
 		if result.Err() != nil {
 			return result.Err()

@@ -145,7 +145,7 @@ func (bs *BroadcastSubscriber) processBroadcastMessages(msgs <-chan amqp.Deliver
 		baseEvent, err := FromJSON(msg.Body)
 		if err != nil {
 			bs.logger.Errorf("Failed to parse broadcast event JSON: %v", err)
-			msg.Nack(false, false)
+			nack(msg, false)
 			continue
 		}
 
@@ -172,7 +172,7 @@ func (bs *BroadcastSubscriber) processBroadcastMessages(msgs <-chan amqp.Deliver
 		bs.logger.Debugf("Processing broadcast message: %s from exchange %s", baseEvent.Type, exchangeName)
 
 		// Process event with handler (using BaseEvent interface)
-		ctx := context.WithValue(context.Background(), "broadcast_metadata", broadcastEvent)
+		ctx := WithBroadcast(context.Background(), broadcastEvent)
 		if err := handler.Handle(ctx, baseEvent); err != nil {
 			bs.logger.Errorf("Failed to process broadcast event %s: %v", baseEvent.ID, err)
 
@@ -187,14 +187,14 @@ func (bs *BroadcastSubscriber) processBroadcastMessages(msgs <-chan amqp.Deliver
 			// Retry logic for broadcast messages
 			if retryCount < 3 { // Max 3 retries for broadcast
 				bs.logger.Warnf("Retrying broadcast message %s (attempt %d)", baseEvent.ID, retryCount+1)
-				msg.Nack(false, true) // Requeue for retry
+				nack(msg, true) // Requeue for retry
 			} else {
 				bs.logger.Errorf("Max retries exceeded for broadcast message %s, discarding", baseEvent.ID)
-				msg.Nack(false, false) // Don't requeue, send to DLX if configured
+				nack(msg, false) // Don't requeue, send to DLX if configured
 			}
 		} else {
 			// Acknowledge successful processing
-			msg.Ack(false)
+			ack(msg)
 			bs.logger.Debugf("Successfully processed broadcast event %s", baseEvent.ID)
 		}
 	}

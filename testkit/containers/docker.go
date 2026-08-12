@@ -22,38 +22,23 @@ type TestContainers struct {
 	ctx               context.Context
 }
 
-// NewTestContainers creates and starts test containers
+// NewTestContainers creates and starts test containers with the default
+// images and startup timeout.
 func NewTestContainers(ctx context.Context) (*TestContainers, error) {
-	containers := &TestContainers{
-		ctx: ctx,
-	}
-
-	if err := containers.startPostgres(); err != nil {
-		return nil, fmt.Errorf("failed to start postgres container: %w", err)
-	}
-
-	if err := containers.startRedis(); err != nil {
-		return nil, fmt.Errorf("failed to start redis container: %w", err)
-	}
-
-	if err := containers.startRabbitMQ(); err != nil {
-		return nil, fmt.Errorf("failed to start rabbitmq container: %w", err)
-	}
-
-	return containers, nil
+	return NewTestContainersWithConfig(ctx, nil)
 }
 
 // startPostgres starts a PostgreSQL test container
-func (tc *TestContainers) startPostgres() error {
+func (tc *TestContainers) startPostgres(config *TestContainerConfig) error {
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:15-alpine",
+		Image:        config.PostgresImage,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_DB":       "test_db",
 			"POSTGRES_USER":     "test_user",
 			"POSTGRES_PASSWORD": "test_password",
 		},
-		WaitingFor: wait.ForListeningPort("5432/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor: wait.ForListeningPort("5432/tcp").WithStartupTimeout(config.StartTimeout),
 	}
 
 	container, err := testcontainers.GenericContainer(tc.ctx, testcontainers.GenericContainerRequest{
@@ -69,11 +54,11 @@ func (tc *TestContainers) startPostgres() error {
 }
 
 // startRedis starts a Redis test container
-func (tc *TestContainers) startRedis() error {
+func (tc *TestContainers) startRedis(config *TestContainerConfig) error {
 	req := testcontainers.ContainerRequest{
-		Image:        "redis:7-alpine",
+		Image:        config.RedisImage,
 		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForListeningPort("6379/tcp").WithStartupTimeout(30 * time.Second),
+		WaitingFor:   wait.ForListeningPort("6379/tcp").WithStartupTimeout(config.StartTimeout),
 	}
 
 	container, err := testcontainers.GenericContainer(tc.ctx, testcontainers.GenericContainerRequest{
@@ -89,15 +74,15 @@ func (tc *TestContainers) startRedis() error {
 }
 
 // startRabbitMQ starts a RabbitMQ test container
-func (tc *TestContainers) startRabbitMQ() error {
+func (tc *TestContainers) startRabbitMQ(config *TestContainerConfig) error {
 	req := testcontainers.ContainerRequest{
-		Image:        "rabbitmq:3-management-alpine",
+		Image:        config.RabbitMQImage,
 		ExposedPorts: []string{"5672/tcp", "15672/tcp"},
 		Env: map[string]string{
 			"RABBITMQ_DEFAULT_USER": "test_user",
 			"RABBITMQ_DEFAULT_PASS": "test_password",
 		},
-		WaitingFor: wait.ForListeningPort("5672/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor: wait.ForListeningPort("5672/tcp").WithStartupTimeout(config.StartTimeout),
 	}
 
 	container, err := testcontainers.GenericContainer(tc.ctx, testcontainers.GenericContainerRequest{
@@ -137,7 +122,7 @@ func (tc *TestContainers) OpenPostgres() (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to connect to test database: %w", err)
 	}
 	if err := db.PingContext(tc.ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to reach test database: %w", err)
 	}
 
@@ -217,11 +202,11 @@ func (tc *TestContainers) WaitForPostgres() error {
 	for i := 0; i < 30; i++ {
 		db, err := sql.Open("postgres", connStr)
 		if err == nil {
-			if err := db.Ping(); err == nil {
-				db.Close()
+			pingErr := db.Ping()
+			_ = db.Close()
+			if pingErr == nil {
 				return nil
 			}
-			db.Close()
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -274,7 +259,7 @@ func (tc *TestContainers) GetContainerLogs(containerName string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("failed to get logs for %s: %w", containerName, err)
 	}
-	defer logs.Close()
+	defer func() { _ = logs.Close() }()
 
 	logBytes, err := io.ReadAll(logs)
 	if err != nil {
@@ -326,7 +311,7 @@ func (tc *TestContainers) LoadSQLFixture(fixturePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 
 	// Read fixture file
 	fixtureData, err := os.ReadFile(fixturePath)
@@ -365,7 +350,7 @@ func (tc *TestContainers) CleanupDatabase() error {
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 
 	// Get all table names
 	rows, err := sqlDB.Query(`
@@ -376,7 +361,7 @@ func (tc *TestContainers) CleanupDatabase() error {
 	if err != nil {
 		return fmt.Errorf("failed to query table names: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tables []string
 	for rows.Next() {
@@ -385,6 +370,11 @@ func (tc *TestContainers) CleanupDatabase() error {
 			return fmt.Errorf("failed to scan table name: %w", err)
 		}
 		tables = append(tables, tableName)
+	}
+	// A failure part-way through iteration leaves a short list, which would
+	// silently skip truncating whatever came after it.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to read table names: %w", err)
 	}
 
 	// Truncate all tables
@@ -443,33 +433,51 @@ func DefaultTestContainerConfig() *TestContainerConfig {
 	}
 }
 
-// NewTestContainersWithConfig creates test containers with custom configuration
+// NewTestContainersWithConfig creates and starts test containers using the
+// given images and startup timeout. A nil config, or any zero field within
+// one, falls back to the defaults.
 func NewTestContainersWithConfig(ctx context.Context, config *TestContainerConfig) (*TestContainers, error) {
-	if config == nil {
-		config = DefaultTestContainerConfig()
-	}
+	config = config.withDefaults()
 
-	containers := &TestContainers{
-		ctx: ctx,
-	}
+	containers := &TestContainers{ctx: ctx}
 
-	// Start containers with custom config...
-	// Implementation would use the config values instead of hardcoded ones
-	// For brevity, using the existing implementation
-
-	if err := containers.startPostgres(); err != nil {
+	if err := containers.startPostgres(config); err != nil {
 		return nil, fmt.Errorf("failed to start postgres container: %w", err)
 	}
 
-	if err := containers.startRedis(); err != nil {
+	if err := containers.startRedis(config); err != nil {
 		return nil, fmt.Errorf("failed to start redis container: %w", err)
 	}
 
-	if err := containers.startRabbitMQ(); err != nil {
+	if err := containers.startRabbitMQ(config); err != nil {
 		return nil, fmt.Errorf("failed to start rabbitmq container: %w", err)
 	}
 
 	return containers, nil
+}
+
+// withDefaults fills in any field the caller left zero, so a config naming
+// only the Postgres image still gets working defaults for the rest.
+func (c *TestContainerConfig) withDefaults() *TestContainerConfig {
+	defaults := DefaultTestContainerConfig()
+	if c == nil {
+		return defaults
+	}
+
+	filled := *c
+	if filled.PostgresImage == "" {
+		filled.PostgresImage = defaults.PostgresImage
+	}
+	if filled.RedisImage == "" {
+		filled.RedisImage = defaults.RedisImage
+	}
+	if filled.RabbitMQImage == "" {
+		filled.RabbitMQImage = defaults.RabbitMQImage
+	}
+	if filled.StartTimeout == 0 {
+		filled.StartTimeout = defaults.StartTimeout
+	}
+	return &filled
 }
 
 // HealthCheck represents a health check for a container service

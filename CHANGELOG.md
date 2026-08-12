@@ -8,6 +8,41 @@ releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **go-redis upgraded from v8 to v9** (`github.com/redis/go-redis/v9`).
+  `rediscluster` exposes go-redis types directly, so this is a breaking change
+  for anything that names them — done before the first tag, while it is free.
+  `ClusterAdapter.ExecuteWithRetry` now hands its callback a `context.Context`
+  rather than relying on the removed `Client.WithContext`.
+
+### Fixed
+
+- `rediscluster` applied its idle-connection setting to go-redis's
+  `PoolTimeout`, which governs how long to wait for a free connection — a
+  different thing entirely. It now sets `ConnMaxIdleTime`.
+- `ClusterAdapter.ExecuteWithRetry` never applied `HealthCheckTimeout`: the
+  timeout rode on the client via `WithContext`, which every command ignored
+  because each takes a context of its own.
+- `Close` on the Postgres, Redis and RabbitMQ cluster types declared an
+  `error` return and always returned `nil`, discarding per-node close
+  failures. They now report what failed via `errors.Join`.
+- `eventbus` and `amqpcluster` ignored the result of every AMQP ack and nack.
+  A failed acknowledgement means the broker redelivers a message it never
+  recorded an outcome for, so the duplicate surfaced far from the cause; the
+  failures are now logged.
+- Event and broadcast metadata travelled on the handler context under bare
+  string keys, which any package could collide with. They now use unexported
+  key types, with `eventbus.UserID` and `eventbus.Broadcast` to read them.
+- `testkit`'s `NewTestContainersWithConfig` accepted a configuration and
+  ignored it, silently starting the default images. It now honours the images
+  and startup timeout, falling back to defaults per field.
+- `testkit`'s database cleanup ignored `rows.Err()`, so a mid-iteration
+  failure produced a short table list and silently skipped truncating the
+  rest.
+- `health`'s handlers ignored JSON encoding failures, hiding truncated
+  responses.
+
 ## [0.1.0] - 2026-08-12
 
 First release. The toolkit was extracted from a 17-service platform where

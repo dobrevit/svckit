@@ -148,7 +148,7 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 
 	// Close existing connections
 	if node.conn != nil && !node.conn.IsClosed() {
-		node.conn.Close()
+		_ = node.conn.Close() // replacing this connection; nothing to do if it objects
 	}
 
 	// Create new connection
@@ -164,7 +164,7 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	// Create channels
 	publishCh, err := conn.Channel()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close() // the connection is unusable without a channel
 		node.state = NodeFailed
 		node.lastError = err
 		return fmt.Errorf("failed to create publish channel for %s: %w", maskCredentials(node.URL), err)
@@ -172,8 +172,8 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 
 	subscribeCh, err := conn.Channel()
 	if err != nil {
-		publishCh.Close()
-		conn.Close()
+		_ = publishCh.Close()
+		_ = conn.Close()
 		node.state = NodeFailed
 		node.lastError = err
 		return fmt.Errorf("failed to create subscribe channel for %s: %w", maskCredentials(node.URL), err)
@@ -462,27 +462,36 @@ type NodeStats struct {
 }
 
 // Close gracefully shuts down all connections
+// Close gracefully shuts down all connections. Every node is closed even if
+// an earlier one failed; the failures are joined into the returned error
+// rather than discarded, which is what this method used to do.
 func (ca *ClusterAdapter) Close() error {
 	// Stop background tasks using tomb manager
 	ca.tombManager.Shutdown()
 
-	// Close all node connections
+	var errs []error
 	for _, node := range ca.nodes {
 		node.mutex.Lock()
 		if node.publishCh != nil {
-			node.publishCh.Close()
+			if err := node.publishCh.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("closing publish channel on %s: %w", node.Name, err))
+			}
 		}
 		if node.subscribeCh != nil {
-			node.subscribeCh.Close()
+			if err := node.subscribeCh.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("closing subscribe channel on %s: %w", node.Name, err))
+			}
 		}
 		if node.conn != nil && !node.conn.IsClosed() {
-			node.conn.Close()
+			if err := node.conn.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("closing connection to %s: %w", node.Name, err))
+			}
 		}
 		node.mutex.Unlock()
 	}
 
 	logging.Info("RabbitMQ cluster adapter closed")
-	return nil
+	return errors.Join(errs...)
 }
 
 // startHealthMonitoring begins periodic health checks of all nodes using tomb manager

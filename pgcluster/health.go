@@ -81,7 +81,7 @@ func (cm *ClusterManager) checkNodeHealth(node *DatabaseNode) {
 			logging.Error("Node %s marked as failed due to non-retryable error: %v", node.Name, err)
 
 			// Close the connection to force reconnection
-			node.sqlDB.Close()
+			_ = node.sqlDB.Close() // forcing a reconnect; the pool is going away
 			node.sqlDB = nil
 		}
 		return
@@ -214,9 +214,10 @@ func (cm *ClusterManager) HealthCheck() error {
 	for _, node := range cm.nodes {
 		node.mutex.RLock()
 		if node.Health == HealthHealthy {
-			if node.Role == RoleWriter {
+			switch node.Role {
+			case RoleWriter:
 				writerHealthy = true
-			} else if node.Role == RoleReader {
+			case RoleReader:
 				readerCount++
 			}
 		}

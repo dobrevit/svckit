@@ -1,0 +1,44 @@
+# Labels the release drafter groups by. Apply with a label-sync action or by
+# hand; the names must match .github/release-drafter.yml.
+- name: breaking
+  color: b60205
+  description: Changes an existing API in a way that requires consumer edits
+- name: feature
+  color: 0e8a16
+  description: New capability
+- name: enhancement
+  color: 0e8a16
+  description: Improves existing behaviour
+- name: bug
+  color: d73a4a
+  description: Something is wrong
+- name: fix
+  color: d73a4a
+  description: Corrects a defect
+- name: security
+  color: b60205
+  description: Security fix or hardening
+- name: performance
+  color: fbca04
+  description: Makes something faster or lighter
+- name: documentation
+  color: 0075ca
+  description: Docs, comments and examples
+- name: test
+  color: c2e0c6
+  description: Tests and test harness
+- name: ci
+  color: c2e0c6
+  description: Build, workflows and tooling
+- name: dependencies
+  color: 0366d6
+  description: Dependency updates
+- name: go
+  color: 00add8
+  description: Go code
+- name: testkit
+  color: 00add8
+  description: The testkit module
+- name: skip-changelog
+  color: ededed
+  description: Omit from the drafted release notes

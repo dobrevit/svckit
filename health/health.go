@@ -10,8 +10,9 @@ import (
 
 	"github.com/dobrevit/svckit/amqpcluster"
 	"github.com/dobrevit/svckit/buildinfo"
+	"github.com/dobrevit/svckit/logging"
 	"github.com/dobrevit/svckit/rediscluster"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // ServiceHealth represents the health status of a service
@@ -207,9 +208,11 @@ func SimpleHealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{
+		if err := json.NewEncoder(w).Encode(map[string]string{
 			"status": "ok",
-		})
+		}); err != nil {
+			logging.Error("Failed to write health response: %v", err)
+		}
 	}
 }
 
@@ -220,14 +223,15 @@ func (h *HealthChecker) DetailedHealthHandler() http.HandlerFunc {
 		health := h.CheckHealth(ctx)
 
 		statusCode := http.StatusOK
-		if health.Status == "degraded" {
-			statusCode = http.StatusServiceUnavailable
-		} else if health.Status == "unhealthy" {
+		switch health.Status {
+		case "degraded", "unhealthy":
 			statusCode = http.StatusServiceUnavailable
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
-		json.NewEncoder(w).Encode(health)
+		if err := json.NewEncoder(w).Encode(health); err != nil {
+			logging.Error("Failed to write health response: %v", err)
+		}
 	}
 }

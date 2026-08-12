@@ -80,7 +80,7 @@ func (ca *ClusterAdapter) checkNodeHealth(node *RedisNode) {
 
 		// Attempt reconnection
 		logging.Info("Attempting to reconnect to failed node %s", node.Name)
-		node.client.Close()
+		_ = node.client.Close() // forcing a reconnect; the client is going away
 		node.client = nil
 
 		// Try to reconnect
@@ -94,14 +94,15 @@ func (ca *ClusterAdapter) checkNodeHealth(node *RedisNode) {
 	node.lastLatency = latency
 
 	// Check if node should be upgraded from degraded to healthy
-	if node.state == NodeDegraded {
+	switch node.state {
+	case NodeDegraded:
 		// Reset error count if enough time has passed
 		if time.Since(node.lastCheck) > ca.config.CircuitBreakerTimeout {
 			atomic.StoreInt64(&node.errorCount, 0)
 			node.state = NodeHealthy
 			logging.Info("Redis node %s recovered from degraded to healthy", node.Name)
 		}
-	} else if node.state == NodeFailed {
+	case NodeFailed:
 		// Node recovered from failed state
 		node.state = NodeHealthy
 		atomic.StoreInt64(&node.errorCount, 0)

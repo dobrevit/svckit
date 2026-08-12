@@ -146,7 +146,7 @@ func (k *KubernetesStore) Get(ctx context.Context, path string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := k.checkStatus(resp, path); err != nil {
 		return "", err
@@ -187,7 +187,7 @@ func (k *KubernetesStore) Set(ctx context.Context, path string, value string) er
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusOK {
 		return nil
@@ -214,7 +214,7 @@ func (k *KubernetesStore) Set(ctx context.Context, path string, value string) er
 	if err != nil {
 		return err
 	}
-	defer createResp.Body.Close()
+	defer func() { _ = createResp.Body.Close() }()
 	if createResp.StatusCode == http.StatusCreated || createResp.StatusCode == http.StatusOK {
 		return nil
 	}

@@ -99,7 +99,7 @@ func (v *VaultStore) Get(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := v.checkStatus(resp, path); err != nil {
 		return "", err
@@ -130,7 +130,7 @@ func (v *VaultStore) Set(ctx context.Context, path string, value string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
 		return nil
