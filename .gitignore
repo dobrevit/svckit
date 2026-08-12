@@ -1,0 +1,18 @@
+# Build output
+/dist/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.txt
+coverage.html
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Go workspace: local to a developer's machine, not the repo's contract
+go.work
+go.work.sum

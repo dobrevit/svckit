@@ -1,0 +1,53 @@
+# Infrastructure for the integration tier.
+#
+#   docker compose up -d --wait
+#   go test -race -tags integration ./...
+#
+# The integration tests are behind the "integration" build tag, so a plain
+# `go test ./...` never reaches them and needs none of this running.
+#
+# Environment contract (all overridable; the defaults match the ports below):
+#   DB_HOST=localhost DB_PORT=5433 DB_USER=test_user
+#   DB_PASSWORD=test_password DB_NAME=test_db
+#   RABBITMQ_URL=amqp://test_user:test_password@localhost:5673/
+#   REDIS_TEST_URL=redis://localhost:6379
+#
+# The credentials are deliberately throwaway: this stack is for tests on a
+# development machine and in CI, never for anything that holds real data.
+services:
+  postgres-test:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: test_db
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d test_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq-test:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: test_user
+      RABBITMQ_DEFAULT_PASS: test_password
+    ports:
+      - "5673:5672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

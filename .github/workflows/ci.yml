@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # The dependency set (pgx, prometheus, golang.org/x/*) requires Go 1.25.
+  GO_VERSION: "1.25"
+
+jobs:
+  build:
+    name: Build and vet (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "1.26"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: |
+            go.sum
+            testkit/go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build testkit
+        working-directory: testkit
+        run: go build ./...
+
+      - name: Vet testkit
+        working-directory: testkit
+        run: go vet ./...
+
+      # The integration tier is behind a build tag; make sure it still
+      # compiles even on the jobs that do not run it.
+      - name: Vet integration tier
+        run: |
+          go vet -tags integration ./...
+          cd testkit && go vet -tags integration ./...
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go.sum
+            testkit/go.sum
+
+      - name: Test
+        run: go test -race -short -count=1 -coverprofile=coverage.txt ./...
+
+      - name: Test testkit
+        working-directory: testkit
+        run: go test -race -short -count=1 ./...
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.txt
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go.sum
+            testkit/go.sum
+
+      - name: Start dependencies
+        run: docker compose up -d --wait
+
+      - name: Test
+        env:
+          INTEGRATION_TESTS: "true"
+        run: go test -race -tags integration -count=1 ./...
+
+      - name: Test testkit
+        working-directory: testkit
+        env:
+          INTEGRATION_TESTS: "true"
+        run: go test -race -tags integration -count=1 ./...
+
+      - name: Dependency logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop dependencies
+        if: always()
+        run: docker compose down -v
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+  tidy:
+    name: go.mod is tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Verify tidy
+        run: |
+          go mod tidy
+          cd testkit && go mod tidy && cd ..
+          git diff --exit-code -- go.mod go.sum testkit/go.mod testkit/go.sum
