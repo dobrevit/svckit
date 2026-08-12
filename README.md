@@ -19,11 +19,15 @@ never against a web framework or an ORM. Middleware is
 `func(http.Handler) http.Handler`. The database layer hands back `*sql.DB`.
 Logging ships `slog.Handler` implementations rather than a logger type.
 
-The practical consequence: **the module depends on no web framework and no
-ORM.** Chi and the Go 1.22+ `http.ServeMux` consume the middleware natively;
-Gin needs a roughly fifteen-line shim; GORM or Ent bind to the `*sql.DB` in
-about ten lines. None of those adapters live here, so you never carry a
-framework you did not choose.
+The practical consequence: **the core module depends on no web framework and
+no ORM.** Chi and the Go 1.22+ `http.ServeMux` consume the middleware
+natively — `chi.Use` takes exactly `func(http.Handler) http.Handler`. Gin
+needs translation, so it gets its own module. GORM or Ent bind to the
+`*sql.DB` in about ten lines.
+
+Adapters are separate modules, so importing svckit never pulls in a framework
+you did not choose, and a project pinned to a different framework version is
+unaffected by what an adapter requires.
 
 **Where the abstraction stops.** Some things are not worth hiding: go-redis,
 Prometheus and RabbitMQ appear as themselves. Small interfaces at the edges
@@ -36,12 +40,45 @@ possible without pre-building them.
 go get github.com/dobrevit/svckit
 ```
 
-The test harness is a separate module, so services do not inherit Docker and
-testcontainers:
+Optional modules — take only what you use:
 
 ```bash
-go get github.com/dobrevit/svckit/testkit
+go get github.com/dobrevit/svckit/testkit  # test harness (Docker, testcontainers)
+go get github.com/dobrevit/svckit/chix     # chi router adapter
+go get github.com/dobrevit/svckit/ginx     # Gin framework adapter
 ```
+
+### Using it from chi
+
+Nothing to adapt — chi consumes the middleware directly:
+
+```go
+r := chi.NewRouter()
+r.Use(chix.Route())                        // label metrics by route template
+r.Use(middleware.Tracing())
+r.Use(middleware.Metrics("orders"))
+r.Use(middleware.RequestLogging("orders"))
+```
+
+`chix.Route()` is the only piece that needs a shim: chi knows the matched
+pattern only after routing, and without it every path parameter becomes its
+own Prometheus label value.
+
+### Using it from Gin
+
+Gin has its own handler type, context and response writer, so each middleware
+needs translating — that is what `ginx` is:
+
+```go
+router := gin.New()
+router.Use(ginx.Route())
+router.Use(ginx.TracingMiddleware())
+router.Use(ginx.PrometheusMiddleware("orders"))
+router.Use(ginx.LoggingMiddleware())
+```
+
+`ginx.Use` adapts any `func(http.Handler) http.Handler` into a
+`gin.HandlerFunc`, covering anything it does not wrap explicitly.
 
 ## Packages
 
@@ -65,6 +102,8 @@ go get github.com/dobrevit/svckit/testkit
 | [`rediscluster`](rediscluster) | Redis cluster client with health checking and load balancing |
 | [`secrets`](secrets) | Secret resolution over environment variables, Vault or Kubernetes Secrets |
 | [`testkit`](testkit) | Test harness: suites, mocks, assertions and container fixtures *(separate module)* |
+| [`chix`](chix) | chi router adapter — route-template labelling *(separate module)* |
+| [`ginx`](ginx) | Gin adapter — middleware, response helpers, pagination *(separate module)* |
 
 ## Quick start
 

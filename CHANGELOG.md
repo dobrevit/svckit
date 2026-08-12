@@ -8,6 +8,33 @@ releases.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-12
+
+### Added
+
+- **`chix`** *(new module)* — chi router adapter. chi consumes svckit
+  middleware directly, since `chi.Use` takes exactly
+  `func(http.Handler) http.Handler`, so the module is one middleware:
+  `chix.Route()` records chi's matched pattern so metrics and logs are
+  labelled `/orders/{id}` rather than `/orders/42`. Without it the Prometheus
+  series count grows with traffic instead of with the number of routes, and it
+  does so quietly.
+- **`ginx`** *(new module)* — the Gin adapter, moved out of the platform
+  repository it was written in now that it has more than one consumer. Gin has
+  its own handler type, context and response writer, so every middleware needs
+  translating; `ginx.Use` adapts any stdlib middleware into a
+  `gin.HandlerFunc` for anything not wrapped explicitly.
+- `middleware.WithRouteFunc` — records a route pattern to be resolved when it
+  is read, for routers that only know the match after routing. chi is the
+  case that motivated it.
+
+### Notes
+
+- Adapters are separate modules on purpose: the core still depends on no web
+  framework, so importing svckit never pulls in Gin or chi, and a project
+  pinned to a different framework version is unaffected by what an adapter
+  requires.
+
 ## [0.1.2] - 2026-08-12
 
 ### Changed
@@ -171,6 +198,7 @@ It remains the record of what the toolkit contains.
   without this module depending on OpenTelemetry.
 - The main module depends on no web framework and no ORM.
 
-[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/dobrevit/svckit/releases/tag/v0.1.3
 [0.1.2]: https://github.com/dobrevit/svckit/releases/tag/v0.1.2
 [0.1.1]: https://github.com/dobrevit/svckit/releases/tag/v0.1.1

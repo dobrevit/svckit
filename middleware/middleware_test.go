@@ -457,3 +457,29 @@ func TestIsOperationalPath(t *testing.T) {
 		}
 	}
 }
+
+// Routers that only know the matched pattern after routing supply an accessor
+// rather than a value; it must be called at read time, not at attach time.
+func TestRouteResolvesADeferredPattern(t *testing.T) {
+	pattern := "" // empty when attached, as chi's would be
+	r := httptest.NewRequest(http.MethodGet, "/orders/42", nil)
+	r = r.WithContext(middleware.WithRouteFunc(r.Context(), func() string { return pattern }))
+
+	if got := middleware.Route(r); got != "/orders/42" {
+		t.Errorf("Route = %q before the router resolved, want the path", got)
+	}
+
+	pattern = "/orders/{id}" // the router has now matched
+	if got := middleware.Route(r); got != "/orders/{id}" {
+		t.Errorf("Route = %q after the router resolved, want the template", got)
+	}
+}
+
+func TestAStoredPatternStillWins(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/orders/42", nil)
+	r = r.WithContext(middleware.WithRoute(r.Context(), "/orders/{id}"))
+
+	if got := middleware.Route(r); got != "/orders/{id}" {
+		t.Errorf("Route = %q, want the stored template", got)
+	}
+}

@@ -100,11 +100,31 @@ func WithRoute(ctx context.Context, pattern string) context.Context {
 	return context.WithValue(ctx, keyRoute, pattern)
 }
 
+// WithRouteFunc returns a context whose route pattern is resolved by calling
+// resolve, at the moment it is read.
+//
+// Some routers only know the matched pattern after they have routed, which is
+// too late for a middleware that has to attach it on the way in. chi is the
+// common case: it puts its route context in place before matching and fills
+// in the pattern during it, so an adapter captures the accessor here and the
+// value arrives by the time metrics and logging ask for it.
+func WithRouteFunc(ctx context.Context, resolve func() string) context.Context {
+	return context.WithValue(ctx, keyRoute, resolve)
+}
+
 // Route returns the matched route pattern recorded by the router adapter,
-// falling back to the request's path when none was recorded.
+// falling back to the request's path when none was recorded or when a
+// deferred resolver has nothing to report.
 func Route(r *http.Request) string {
-	if pattern, ok := r.Context().Value(keyRoute).(string); ok && pattern != "" {
-		return pattern
+	switch v := r.Context().Value(keyRoute).(type) {
+	case string:
+		if v != "" {
+			return v
+		}
+	case func() string:
+		if pattern := v(); pattern != "" {
+			return pattern
+		}
 	}
 	return r.URL.Path
 }

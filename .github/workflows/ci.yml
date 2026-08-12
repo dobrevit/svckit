@@ -28,6 +28,8 @@ jobs:
           cache-dependency-path: |
             go.sum
             testkit/go.sum
+            chix/go.sum
+            ginx/go.sum
 
       - name: Build
         run: go build ./...
@@ -35,20 +37,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Build testkit
-        working-directory: testkit
-        run: go build ./...
-
-      - name: Vet testkit
-        working-directory: testkit
-        run: go vet ./...
+      - name: Build and vet the submodules
+        run: |
+          for m in testkit chix ginx; do
+            echo "== $m =="
+            (cd "$m" && go build ./... && go vet ./...)
+          done
 
       # The integration tier is behind a build tag; make sure it still
       # compiles even on the jobs that do not run it.
       - name: Vet integration tier
         run: |
           go vet -tags integration ./...
-          cd testkit && go vet -tags integration ./...
+          for m in testkit chix ginx; do (cd "$m" && go vet -tags integration ./...); done
 
   unit:
     name: Unit tests
@@ -61,13 +62,18 @@ jobs:
           cache-dependency-path: |
             go.sum
             testkit/go.sum
+            chix/go.sum
+            ginx/go.sum
 
       - name: Test
         run: go test -race -short -count=1 -coverprofile=coverage.txt ./...
 
-      - name: Test testkit
-        working-directory: testkit
-        run: go test -race -short -count=1 ./...
+      - name: Test the submodules
+        run: |
+          for m in testkit chix ginx; do
+            echo "== $m =="
+            (cd "$m" && go test -race -short -count=1 ./...)
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -85,6 +91,8 @@ jobs:
           cache-dependency-path: |
             go.sum
             testkit/go.sum
+            chix/go.sum
+            ginx/go.sum
 
       - name: Start dependencies
         run: docker compose up -d --wait
@@ -94,11 +102,14 @@ jobs:
           INTEGRATION_TESTS: "true"
         run: go test -race -tags integration -count=1 ./...
 
-      - name: Test testkit
-        working-directory: testkit
+      - name: Test the submodules
         env:
           INTEGRATION_TESTS: "true"
-        run: go test -race -tags integration -count=1 ./...
+        run: |
+          for m in testkit chix ginx; do
+            echo "== $m =="
+            (cd "$m" && go test -race -tags integration -count=1 ./...)
+          done
 
       - name: Dependency logs
         if: failure()
@@ -131,5 +142,5 @@ jobs:
       - name: Verify tidy
         run: |
           go mod tidy
-          cd testkit && go mod tidy && cd ..
-          git diff --exit-code -- go.mod go.sum testkit/go.mod testkit/go.sum
+          for m in testkit chix ginx; do (cd "$m" && go mod tidy); done
+          git diff --exit-code -- '*go.mod' '*go.sum' 
