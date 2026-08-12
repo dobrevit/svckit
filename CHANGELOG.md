@@ -8,6 +8,8 @@ releases.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-12
+
 ### Changed
 
 - **Successful requests to the operational endpoints are logged at debug
@@ -169,5 +171,6 @@ It remains the record of what the toolkit contains.
   without this module depending on OpenTelemetry.
 - The main module depends on no web framework and no ORM.
 
-[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/dobrevit/svckit/releases/tag/v0.1.2
 [0.1.1]: https://github.com/dobrevit/svckit/releases/tag/v0.1.1
