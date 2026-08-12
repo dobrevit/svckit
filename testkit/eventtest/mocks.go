@@ -216,14 +216,14 @@ func (h *SecurityTestHelper) CreateExpiredEvent() *eventbus.BaseEvent {
 		Timestamp: time.Now().Add(-2 * time.Hour), // 2 hours ago
 		Source:    "test-service",
 		UserID:    "test-user",
-		Data:      map[string]interface{}{"test": "expired"},
+		Data:      map[string]any{"test": "expired"},
 	}
 }
 
 // CreateTamperedEvent creates an event with tampered data
 func (h *SecurityTestHelper) CreateTamperedEvent(originalEvent *eventbus.BaseEvent) *eventbus.BaseEvent {
 	tampered := *originalEvent
-	tampered.Data = map[string]interface{}{
+	tampered.Data = map[string]any{
 		"tampered":  true,
 		"malicious": "data",
 	}

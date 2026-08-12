@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -16,6 +17,10 @@ import (
 type Manager struct {
 	tomb *tomb.Tomb
 	name string
+
+	// started records whether any goroutine was ever handed to the tomb.
+	// See Wait for why that has to be tracked.
+	started atomic.Bool
 }
 
 // NewManager creates a new tomb manager for a service
@@ -28,6 +33,7 @@ func NewManager(serviceName string) *Manager {
 
 // Go starts a new goroutine managed by the tomb
 func (m *Manager) Go(f func() error) {
+	m.started.Store(true)
 	m.tomb.Go(f)
 }
 
@@ -36,8 +42,16 @@ func (m *Manager) Kill(reason error) {
 	m.tomb.Kill(reason)
 }
 
-// Wait waits for all goroutines to finish
+// Wait waits for all managed goroutines to finish.
+//
+// It returns immediately when none were ever started. tomb closes the channel
+// Wait blocks on only from inside a finishing goroutine, so waiting on a tomb
+// that never had one blocks forever — which would hang shutdown for a service
+// that registered no background work.
 func (m *Manager) Wait() error {
+	if !m.started.Load() {
+		return nil
+	}
 	return m.tomb.Wait()
 }
 
@@ -104,6 +118,7 @@ func (m *Manager) WaitForShutdownSignal(server *http.Server, additionalCleanup .
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
 	<-quit
 	logging.Info("Shutting down %s...", m.name)
 

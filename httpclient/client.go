@@ -546,7 +546,7 @@ func NewServiceClient(baseURL, serviceName, authToken string) *Client {
 type Request struct {
 	Method      string
 	Path        string
-	Body        interface{}
+	Body        any
 	Headers     map[string]string
 	QueryParams map[string]string
 }
@@ -759,7 +759,7 @@ func (c *Client) Get(ctx context.Context, path string, queryParams map[string]st
 }
 
 // Post performs a POST request
-func (c *Client) Post(ctx context.Context, path string, body interface{}) (*Response, error) {
+func (c *Client) Post(ctx context.Context, path string, body any) (*Response, error) {
 	return c.Do(ctx, Request{
 		Method: http.MethodPost,
 		Path:   path,
@@ -768,7 +768,7 @@ func (c *Client) Post(ctx context.Context, path string, body interface{}) (*Resp
 }
 
 // Put performs a PUT request
-func (c *Client) Put(ctx context.Context, path string, body interface{}) (*Response, error) {
+func (c *Client) Put(ctx context.Context, path string, body any) (*Response, error) {
 	return c.Do(ctx, Request{
 		Method: http.MethodPut,
 		Path:   path,
@@ -819,7 +819,7 @@ func (c *Client) GetServiceName() string {
 }
 
 // DecodeJSON decodes a JSON response into the provided interface
-func (r *Response) DecodeJSON(v interface{}) error {
+func (r *Response) DecodeJSON(v any) error {
 	if err := json.Unmarshal(r.Body, v); err != nil {
 		return fmt.Errorf("failed to decode JSON response: %w", err)
 	}

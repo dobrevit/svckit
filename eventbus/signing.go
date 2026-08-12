@@ -88,10 +88,12 @@ func VerifyEvent(signedEvent *SignedEvent, config *SignatureConfig) error {
 		config = DefaultSignatureConfig()
 	}
 
-	// Debug: log key info (first few chars only for security)
-	if len(config.SigningKey) > 0 {
-		fmt.Printf("DEBUG: Verification using key: %.8s... (len=%d)\n", string(config.SigningKey), len(config.SigningKey))
-	}
+	// No key material is logged here, for the same reason it is not logged in
+	// SignEvent: printing the first eight characters and the exact length on
+	// every verification leaks key material into any log aggregator, and since
+	// the development default is a constant in this repository it also
+	// announces which key is in use. The signing side was fixed earlier; this
+	// half was missed.
 
 	// Check if signature has expired
 	if time.Now().After(signedEvent.ExpiresAt) {
@@ -132,7 +134,7 @@ func createCanonicalEventData(event *BaseEvent, signedAt, expiresAt time.Time) (
 	}
 
 	// Create a deterministic representation using ordered map
-	canonicalData := map[string]interface{}{
+	canonicalData := map[string]any{
 		"data":       normalizedData,
 		"expires_at": expiresAt.Unix(),
 		"id":         event.ID,
@@ -153,7 +155,7 @@ func createCanonicalEventData(event *BaseEvent, signedAt, expiresAt time.Time) (
 }
 
 // normalizeDataStructure ensures consistent data structure by doing a JSON roundtrip
-func normalizeDataStructure(data interface{}) (interface{}, error) {
+func normalizeDataStructure(data any) (any, error) {
 	if data == nil {
 		return nil, nil
 	}
@@ -164,8 +166,8 @@ func normalizeDataStructure(data interface{}) (interface{}, error) {
 		return nil, err
 	}
 
-	// Unmarshal back to interface{} to normalize structure
-	var normalized interface{}
+	// Unmarshal back to any to normalize structure
+	var normalized any
 	if err := json.Unmarshal(jsonBytes, &normalized); err != nil {
 		return nil, err
 	}
@@ -174,9 +176,9 @@ func normalizeDataStructure(data interface{}) (interface{}, error) {
 }
 
 // marshalCanonicalJSON marshals data to JSON with sorted keys for deterministic output
-func marshalCanonicalJSON(v interface{}) ([]byte, error) {
+func marshalCanonicalJSON(v any) ([]byte, error) {
 	switch val := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		// Sort keys and build JSON manually
 		keys := make([]string, 0, len(val))
 		for k := range val {
@@ -201,7 +203,7 @@ func marshalCanonicalJSON(v interface{}) ([]byte, error) {
 
 		return []byte("{" + strings.Join(parts, ",") + "}"), nil
 
-	case []interface{}:
+	case []any:
 		// Handle arrays
 		var parts []string
 		for _, item := range val {
@@ -310,8 +312,8 @@ func RotateSigningKey(oldConfig *SignatureConfig, newKey []byte) *SignatureConfi
 }
 
 // GetEventSignatureInfo extracts signature information for debugging/logging
-func GetEventSignatureInfo(signedEvent *SignedEvent) map[string]interface{} {
-	return map[string]interface{}{
+func GetEventSignatureInfo(signedEvent *SignedEvent) map[string]any {
+	return map[string]any{
 		"has_signature":  len(signedEvent.Signature) > 0,
 		"signed_at":      signedEvent.SignedAt,
 		"expires_at":     signedEvent.ExpiresAt,

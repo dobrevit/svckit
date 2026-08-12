@@ -17,14 +17,14 @@ import (
 
 // ServiceHealth represents the health status of a service
 type ServiceHealth struct {
-	Status       string                 `json:"status"`
-	Version      string                 `json:"version"`
-	Uptime       int64                  `json:"uptime"`
-	Timestamp    string                 `json:"timestamp"`
-	Service      string                 `json:"service"`
-	Dependencies map[string]bool        `json:"dependencies"`
-	Metrics      map[string]interface{} `json:"metrics"`
-	Error        string                 `json:"error,omitempty"`
+	Status       string          `json:"status"`
+	Version      string          `json:"version"`
+	Uptime       int64           `json:"uptime"`
+	Timestamp    string          `json:"timestamp"`
+	Service      string          `json:"service"`
+	Dependencies map[string]bool `json:"dependencies"`
+	Metrics      map[string]any  `json:"metrics"`
+	Error        string          `json:"error,omitempty"`
 }
 
 // HealthChecker provides health check functionality
@@ -82,7 +82,7 @@ func (h *HealthChecker) CheckHealth(ctx context.Context) ServiceHealth {
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 		Service:      h.serviceName,
 		Dependencies: make(map[string]bool),
-		Metrics:      make(map[string]interface{}),
+		Metrics:      make(map[string]any),
 	}
 
 	// Check PostgreSQL connection
@@ -105,7 +105,7 @@ func (h *HealthChecker) CheckHealth(ctx context.Context) ServiceHealth {
 	if h.redisCluster != nil {
 		clusterHealth := h.redisCluster.GetClusterHealth()
 		health.Dependencies["redis_cluster"] = clusterHealth.HealthyNodes > 0
-		health.Metrics["redis_cluster_nodes"] = map[string]interface{}{
+		health.Metrics["redis_cluster_nodes"] = map[string]any{
 			"total":   clusterHealth.TotalNodes,
 			"healthy": clusterHealth.HealthyNodes,
 		}
@@ -126,7 +126,7 @@ func (h *HealthChecker) CheckHealth(ctx context.Context) ServiceHealth {
 
 		// Add RabbitMQ publisher stats
 		stats := h.rabbitPublisher.GetStats()
-		health.Metrics["rabbitmq_publisher"] = map[string]interface{}{
+		health.Metrics["rabbitmq_publisher"] = map[string]any{
 			"service_name":  stats.ServiceName,
 			"exchange":      stats.Exchange,
 			"total_nodes":   stats.TotalNodes,
@@ -145,7 +145,7 @@ func (h *HealthChecker) CheckHealth(ctx context.Context) ServiceHealth {
 		}
 
 		// Add RabbitMQ subscriber stats
-		health.Metrics["rabbitmq_subscriber"] = map[string]interface{}{
+		health.Metrics["rabbitmq_subscriber"] = map[string]any{
 			"service_name":  stats.ServiceName,
 			"exchange":      stats.Exchange,
 			"total_nodes":   stats.TotalNodes,

@@ -20,13 +20,13 @@ func NewHTTPAssertions(t assert.TestingT) *HTTPAssertions {
 }
 
 // AssertStatusCode verifies HTTP status code
-func (a *HTTPAssertions) AssertStatusCode(actual, expected int, msgAndArgs ...interface{}) bool {
+func (a *HTTPAssertions) AssertStatusCode(actual, expected int, msgAndArgs ...any) bool {
 	return assert.Equal(a.t, expected, actual, msgAndArgs...)
 }
 
 // AssertJSONResponse verifies JSON response structure
-func (a *HTTPAssertions) AssertJSONResponse(body []byte, expectedFields map[string]interface{}, msgAndArgs ...interface{}) bool {
-	var response map[string]interface{}
+func (a *HTTPAssertions) AssertJSONResponse(body []byte, expectedFields map[string]any, msgAndArgs ...any) bool {
+	var response map[string]any
 
 	if !assert.NoError(a.t, json.Unmarshal(body, &response), "Response should be valid JSON") {
 		return false
@@ -47,7 +47,7 @@ func (a *HTTPAssertions) AssertJSONResponse(body []byte, expectedFields map[stri
 }
 
 // AssertContainsHeaders verifies response contains expected headers
-func (a *HTTPAssertions) AssertContainsHeaders(headers map[string]string, expectedHeaders map[string]string, msgAndArgs ...interface{}) bool {
+func (a *HTTPAssertions) AssertContainsHeaders(headers map[string]string, expectedHeaders map[string]string, msgAndArgs ...any) bool {
 	for expectedKey, expectedValue := range expectedHeaders {
 		actualValue, exists := headers[expectedKey]
 		if !assert.True(a.t, exists, "Response missing header: %s", expectedKey) {
@@ -71,13 +71,13 @@ func NewPerformanceAssertions(t assert.TestingT) *PerformanceAssertions {
 }
 
 // AssertExecutionTime verifies execution time is within bounds
-func (a *PerformanceAssertions) AssertExecutionTime(duration time.Duration, maxDuration time.Duration, msgAndArgs ...interface{}) bool {
+func (a *PerformanceAssertions) AssertExecutionTime(duration time.Duration, maxDuration time.Duration, msgAndArgs ...any) bool {
 	return assert.LessOrEqual(a.t, duration, maxDuration,
 		fmt.Sprintf("Execution time %v exceeded maximum %v", duration, maxDuration))
 }
 
 // AssertMinimumThroughput verifies minimum operations per second
-func (a *PerformanceAssertions) AssertMinimumThroughput(operations int, duration time.Duration, minimumOpsPerSecond float64, msgAndArgs ...interface{}) bool {
+func (a *PerformanceAssertions) AssertMinimumThroughput(operations int, duration time.Duration, minimumOpsPerSecond float64, msgAndArgs ...any) bool {
 	actualThroughput := float64(operations) / duration.Seconds()
 	return assert.GreaterOrEqual(a.t, actualThroughput, minimumOpsPerSecond,
 		fmt.Sprintf("Throughput %.2f ops/sec is below minimum %.2f ops/sec", actualThroughput, minimumOpsPerSecond))
@@ -94,19 +94,19 @@ func NewConcurrencyAssertions(t assert.TestingT) *ConcurrencyAssertions {
 }
 
 // AssertNoRaceConditions verifies no race conditions occurred
-func (a *ConcurrencyAssertions) AssertNoRaceConditions(expectedCount int, actualCount int, msgAndArgs ...interface{}) bool {
+func (a *ConcurrencyAssertions) AssertNoRaceConditions(expectedCount int, actualCount int, msgAndArgs ...any) bool {
 	return assert.Equal(a.t, expectedCount, actualCount, "Race condition detected: count mismatch")
 }
 
 // AssertGoroutineCleanup verifies goroutines were properly cleaned up
-func (a *ConcurrencyAssertions) AssertGoroutineCleanup(initialCount int, finalCount int, tolerance int, msgAndArgs ...interface{}) bool {
+func (a *ConcurrencyAssertions) AssertGoroutineCleanup(initialCount int, finalCount int, tolerance int, msgAndArgs ...any) bool {
 	diff := finalCount - initialCount
 	return assert.LessOrEqual(a.t, diff, tolerance,
 		fmt.Sprintf("Goroutine leak detected: %d new goroutines (tolerance: %d)", diff, tolerance))
 }
 
 // BusinessLogicAssertions provides specialized assertions for business logic testing
-func AssertDeepEqual(t assert.TestingT, expected, actual interface{}, msgAndArgs ...interface{}) bool {
+func AssertDeepEqual(t assert.TestingT, expected, actual any, msgAndArgs ...any) bool {
 	if reflect.DeepEqual(expected, actual) {
 		return true
 	}
@@ -126,7 +126,7 @@ func AssertDeepEqual(t assert.TestingT, expected, actual interface{}, msgAndArgs
 }
 
 // RequireEventually is like testify's Eventually but with better error messages
-func RequireEventually(t require.TestingT, condition func() bool, waitFor time.Duration, tick time.Duration, msgAndArgs ...interface{}) {
+func RequireEventually(t require.TestingT, condition func() bool, waitFor time.Duration, tick time.Duration, msgAndArgs ...any) {
 	timer := time.NewTimer(waitFor)
 	defer timer.Stop()
 

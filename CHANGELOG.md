@@ -8,8 +8,18 @@ releases.
 
 ## [Unreleased]
 
+### Added
+
+- Tests for the six packages that had none: `amqpcluster`, `audit`,
+  `buildinfo`, `eventbus`, `health` and `lifecycle`. Every published package
+  now has behavioural tests.
+- `audit.NewAuditClientWithPublisher` — the exported `PublisherInterface` had
+  no constructor that accepted it, so a service could not route audit events
+  through a transport it already owned.
+
 ### Changed
 
+- `interface{}` is spelled `any` throughout.
 - **go-redis upgraded from v8 to v9** (`github.com/redis/go-redis/v9`).
   `rediscluster` exposes go-redis types directly, so this is a breaking change
   for anything that names them — done before the first tag, while it is free.
@@ -18,6 +28,24 @@ releases.
 
 ### Fixed
 
+- **`eventbus.VerifyEvent` printed the signing key** — the first eight
+  characters and the exact length — to stdout on every verification. The same
+  leak had already been identified and removed from `SignEvent`; the fix was
+  applied to one half only. Since the development default key is a constant in
+  this repository, the line also announced which key was in use.
+- **Every `audit.AuditClient` method except `LogSecurityEvent` panicked on a
+  nil client.** `app` leaves `Audit` nil when audit was wired as optional and
+  the broker was unreachable, so a service using `WithOptionalAudit` would
+  crash on its first audit call rather than skipping it. A nil client now
+  means auditing is switched off, consistently across every method.
+- **`lifecycle.Manager.Wait` blocked forever** when no goroutine had ever been
+  started: tomb closes the channel it waits on only from inside a finishing
+  goroutine. `WaitForShutdownSignal` calls `Wait`, so a service that
+  registered no background work would hang on SIGTERM instead of exiting.
+- `lifecycle.WaitForShutdownSignal` left its signal handler registered after
+  returning.
+- `testkit`'s `NewTestContainersWithConfig` accepted a configuration and
+  ignored it, silently starting the default images.
 - `rediscluster` applied its idle-connection setting to go-redis's
   `PoolTimeout`, which governs how long to wait for a free connection — a
   different thing entirely. It now sets `ConnMaxIdleTime`.
@@ -34,9 +62,6 @@ releases.
 - Event and broadcast metadata travelled on the handler context under bare
   string keys, which any package could collide with. They now use unexported
   key types, with `eventbus.UserID` and `eventbus.Broadcast` to read them.
-- `testkit`'s `NewTestContainersWithConfig` accepted a configuration and
-  ignored it, silently starting the default images. It now honours the images
-  and startup timeout, falling back to defaults per field.
 - `testkit`'s database cleanup ignored `rows.Err()`, so a mid-iteration
   failure produced a short table list and silently skipped truncating the
   rest.

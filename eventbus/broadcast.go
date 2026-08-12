@@ -15,10 +15,10 @@ type BroadcastSubscriber struct {
 	*Subscriber
 	instanceID string
 	logger     interface {
-		Infof(format string, args ...interface{})
-		Warnf(format string, args ...interface{})
-		Errorf(format string, args ...interface{})
-		Debugf(format string, args ...interface{})
+		Infof(format string, args ...any)
+		Warnf(format string, args ...any)
+		Errorf(format string, args ...any)
+		Debugf(format string, args ...any)
 	}
 }
 
@@ -307,18 +307,18 @@ var CertificateEventTypes = struct {
 // simpleLogger provides basic logging functionality
 type simpleLogger struct{}
 
-func (l *simpleLogger) Infof(format string, args ...interface{}) {
+func (l *simpleLogger) Infof(format string, args ...any) {
 	log.Printf("[INFO] "+format, args...)
 }
 
-func (l *simpleLogger) Warnf(format string, args ...interface{}) {
+func (l *simpleLogger) Warnf(format string, args ...any) {
 	log.Printf("[WARN] "+format, args...)
 }
 
-func (l *simpleLogger) Errorf(format string, args ...interface{}) {
+func (l *simpleLogger) Errorf(format string, args ...any) {
 	log.Printf("[ERROR] "+format, args...)
 }
 
-func (l *simpleLogger) Debugf(format string, args ...interface{}) {
+func (l *simpleLogger) Debugf(format string, args ...any) {
 	log.Printf("[DEBUG] "+format, args...)
 }

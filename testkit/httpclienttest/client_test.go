@@ -100,7 +100,7 @@ func (s *HTTPClientTestSuite) TestSuccessfulGETRequest() {
 
 	httpAssertions := sharedTesting.NewHTTPAssertions(s.T())
 	httpAssertions.AssertStatusCode(resp.StatusCode, http.StatusOK)
-	httpAssertions.AssertJSONResponse(resp.Body, map[string]interface{}{
+	httpAssertions.AssertJSONResponse(resp.Body, map[string]any{
 		"id":   "123",
 		"name": "test",
 	})
@@ -139,7 +139,7 @@ func (s *HTTPClientTestSuite) TestSuccessfulPOSTRequest() {
 
 	httpAssertions := sharedTesting.NewHTTPAssertions(s.T())
 	httpAssertions.AssertStatusCode(resp.StatusCode, http.StatusCreated)
-	httpAssertions.AssertJSONResponse(resp.Body, map[string]interface{}{
+	httpAssertions.AssertJSONResponse(resp.Body, map[string]any{
 		"id":      "456",
 		"name":    "new item",
 		"created": true,

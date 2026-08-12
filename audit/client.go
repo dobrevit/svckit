@@ -22,7 +22,12 @@ type PublisherInterface interface {
 	Close() error
 }
 
-// AuditClient provides an interface for services to publish audit events
+// AuditClient provides an interface for services to publish audit events.
+//
+// A nil *AuditClient is valid and means auditing is switched off: every method
+// returns nil without doing anything. That is what a service gets when audit
+// was wired as optional and the broker was unreachable, so callers do not have
+// to nil-check before every call.
 type AuditClient struct {
 	publisher   PublisherInterface
 	serviceName string
@@ -52,6 +57,17 @@ func NewClusterAuditClient(nodes []string, serviceName string, signingConfig *ev
 		publisher:   publisher,
 		serviceName: serviceName,
 	}, nil
+}
+
+// NewAuditClientWithPublisher creates an audit client over an existing
+// publisher. It is how a service routes audit events through a transport it
+// already owns — and the only way to supply the exported PublisherInterface,
+// which otherwise had no constructor accepting it.
+func NewAuditClientWithPublisher(publisher PublisherInterface, serviceName string) *AuditClient {
+	return &AuditClient{
+		publisher:   publisher,
+		serviceName: serviceName,
+	}
 }
 
 // NewAuditClientUnsigned creates an audit client without signing (for testing only)
@@ -106,8 +122,8 @@ type AuditEventData struct {
 	Purpose     string `json:"purpose,omitempty"`
 
 	// Additional data
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	Changes  map[string]interface{} `json:"changes,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+	Changes  map[string]any `json:"changes,omitempty"`
 }
 
 // LogOptions contains optional parameters for audit logging
@@ -124,12 +140,15 @@ type LogOptions struct {
 	Sensitivity string
 	LegalBasis  string
 	Purpose     string
-	Metadata    map[string]interface{}
-	Changes     map[string]interface{}
+	Metadata    map[string]any
+	Changes     map[string]any
 }
 
 // Log publishes an audit event asynchronously via RabbitMQ
 func (c *AuditClient) Log(ctx context.Context, eventType, actorType, actorID, action, resource string, status string, opts *LogOptions) error {
+	if c == nil {
+		return nil // auditing is switched off
+	}
 	if opts == nil {
 		opts = &LogOptions{}
 	}
@@ -165,7 +184,7 @@ func (c *AuditClient) Log(ctx context.Context, eventType, actorType, actorID, ac
 	}
 
 	// Convert to map for event publishing
-	eventData := map[string]interface{}{
+	eventData := map[string]any{
 		"audit_data": auditData,
 		"timestamp":  time.Now(),
 		"source":     c.serviceName,
@@ -194,13 +213,16 @@ func (c *AuditClient) Log(ctx context.Context, eventType, actorType, actorID, ac
 
 // LogUserAction logs a user-initiated action
 func (c *AuditClient) LogUserAction(ctx context.Context, userID, userName, action, resource string, status string, opts *LogOptions) error {
+	if c == nil {
+		return nil // auditing is switched off
+	}
 	if opts == nil {
 		opts = &LogOptions{}
 	}
 
 	// Add actor name to metadata
 	if userName != "" && opts.Metadata == nil {
-		opts.Metadata = make(map[string]interface{})
+		opts.Metadata = make(map[string]any)
 	}
 	if userName != "" {
 		opts.Metadata["actor_name"] = userName
@@ -211,13 +233,16 @@ func (c *AuditClient) LogUserAction(ctx context.Context, userID, userName, actio
 
 // LogServiceAction logs a service-initiated action
 func (c *AuditClient) LogServiceAction(ctx context.Context, action, resource string, status string, opts *LogOptions) error {
+	if c == nil {
+		return nil // auditing is switched off
+	}
 	return c.Log(ctx, "system_event", "service", c.serviceName, action, resource, status, opts)
 }
 
 // LogSecurityEvent logs a security-related event
 func (c *AuditClient) LogSecurityEvent(ctx context.Context, actorType, actorID, action, resource string, status string, opts *LogOptions) error {
 	if c == nil {
-		return nil // audit disabled (e.g. in handler unit tests)
+		return nil // auditing is switched off
 	}
 	if opts == nil {
 		opts = &LogOptions{}
@@ -233,12 +258,15 @@ func (c *AuditClient) LogSecurityEvent(ctx context.Context, actorType, actorID, 
 
 // LogDataAccess logs data access events (for compliance)
 func (c *AuditClient) LogDataAccess(ctx context.Context, userID, resource, resourceID string, opts *LogOptions) error {
+	if c == nil {
+		return nil // auditing is switched off
+	}
 	if opts == nil {
 		opts = &LogOptions{}
 	}
 
 	if opts.Metadata == nil {
-		opts.Metadata = make(map[string]interface{})
+		opts.Metadata = make(map[string]any)
 	}
 	opts.Metadata["resource_id"] = resourceID
 
@@ -246,7 +274,10 @@ func (c *AuditClient) LogDataAccess(ctx context.Context, userID, resource, resou
 }
 
 // LogDataModification logs data modification events
-func (c *AuditClient) LogDataModification(ctx context.Context, userID, action, resource, resourceID string, changes map[string]interface{}, opts *LogOptions) error {
+func (c *AuditClient) LogDataModification(ctx context.Context, userID, action, resource, resourceID string, changes map[string]any, opts *LogOptions) error {
+	if c == nil {
+		return nil // auditing is switched off
+	}
 	if opts == nil {
 		opts = &LogOptions{}
 	}
@@ -254,7 +285,7 @@ func (c *AuditClient) LogDataModification(ctx context.Context, userID, action, r
 	opts.Changes = changes
 
 	if opts.Metadata == nil {
-		opts.Metadata = make(map[string]interface{})
+		opts.Metadata = make(map[string]any)
 	}
 	opts.Metadata["resource_id"] = resourceID
 
@@ -263,6 +294,9 @@ func (c *AuditClient) LogDataModification(ctx context.Context, userID, action, r
 
 // Close closes the audit client connection
 func (c *AuditClient) Close() error {
+	if c == nil {
+		return nil // auditing is switched off
+	}
 	if c.publisher != nil {
 		return c.publisher.Close()
 	}
@@ -270,7 +304,7 @@ func (c *AuditClient) Close() error {
 }
 
 // Helper function to extract resource ID from metadata
-func extractResourceID(metadata map[string]interface{}) string {
+func extractResourceID(metadata map[string]any) string {
 	if metadata == nil {
 		return ""
 	}

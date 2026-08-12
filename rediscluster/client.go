@@ -34,7 +34,7 @@ func (c *ClusterClient) Get(ctx context.Context, key string) *redis.StringCmd {
 }
 
 // Set sets key to hold the string value with optional expiration
-func (c *ClusterClient) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd {
+func (c *ClusterClient) Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd {
 	cmd := redis.NewStatusCmd(ctx, "set", key, value)
 	if expiration > 0 {
 		cmd = redis.NewStatusCmd(ctx, "set", key, value, "EX", int64(expiration.Seconds()))
@@ -56,7 +56,7 @@ func (c *ClusterClient) Set(ctx context.Context, key string, value interface{}, 
 
 // Del deletes the specified keys
 func (c *ClusterClient) Del(ctx context.Context, keys ...string) *redis.IntCmd {
-	cmd := redis.NewIntCmd(ctx, append([]interface{}{"del"}, stringSliceToInterfaceSlice(keys)...)...)
+	cmd := redis.NewIntCmd(ctx, append([]any{"del"}, stringSliceToInterfaceSlice(keys)...)...)
 	err := c.adapter.ExecuteWithRetry(ctx, func(ctx context.Context, client *redis.Client) error {
 		result := client.Del(ctx, keys...)
 		cmd.SetVal(result.Val())
@@ -68,7 +68,7 @@ func (c *ClusterClient) Del(ctx context.Context, keys ...string) *redis.IntCmd {
 
 // Exists checks if keys exist
 func (c *ClusterClient) Exists(ctx context.Context, keys ...string) *redis.IntCmd {
-	cmd := redis.NewIntCmd(ctx, append([]interface{}{"exists"}, stringSliceToInterfaceSlice(keys)...)...)
+	cmd := redis.NewIntCmd(ctx, append([]any{"exists"}, stringSliceToInterfaceSlice(keys)...)...)
 	err := c.adapter.ExecuteWithRetry(ctx, func(ctx context.Context, client *redis.Client) error {
 		result := client.Exists(ctx, keys...)
 		cmd.SetVal(result.Val())
@@ -117,8 +117,8 @@ func (c *ClusterClient) HGet(ctx context.Context, key, field string) *redis.Stri
 }
 
 // HSet sets the specified fields to their respective values in the hash stored at key
-func (c *ClusterClient) HSet(ctx context.Context, key string, values ...interface{}) *redis.IntCmd {
-	args := make([]interface{}, 0, 2+len(values))
+func (c *ClusterClient) HSet(ctx context.Context, key string, values ...any) *redis.IntCmd {
+	args := make([]any, 0, 2+len(values))
 	args = append(args, "hset", key)
 	args = append(args, values...)
 	cmd := redis.NewIntCmd(ctx, args...)
@@ -146,7 +146,7 @@ func (c *ClusterClient) HGetAll(ctx context.Context, key string) *redis.MapStrin
 
 // HDel deletes one or more hash fields
 func (c *ClusterClient) HDel(ctx context.Context, key string, fields ...string) *redis.IntCmd {
-	args := make([]interface{}, 0, 2+len(fields))
+	args := make([]any, 0, 2+len(fields))
 	args = append(args, "hdel", key)
 	args = append(args, stringSliceToInterfaceSlice(fields)...)
 	cmd := redis.NewIntCmd(ctx, args...)
@@ -163,8 +163,8 @@ func (c *ClusterClient) HDel(ctx context.Context, key string, fields ...string) 
 // Redis Set operations
 
 // SAdd adds the specified members to the set stored at key
-func (c *ClusterClient) SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd {
-	args := make([]interface{}, 0, 2+len(members))
+func (c *ClusterClient) SAdd(ctx context.Context, key string, members ...any) *redis.IntCmd {
+	args := make([]any, 0, 2+len(members))
 	args = append(args, "sadd", key)
 	args = append(args, members...)
 	cmd := redis.NewIntCmd(ctx, args...)
@@ -191,8 +191,8 @@ func (c *ClusterClient) SMembers(ctx context.Context, key string) *redis.StringS
 }
 
 // SRem removes the specified members from the set stored at key
-func (c *ClusterClient) SRem(ctx context.Context, key string, members ...interface{}) *redis.IntCmd {
-	args := make([]interface{}, 0, 2+len(members))
+func (c *ClusterClient) SRem(ctx context.Context, key string, members ...any) *redis.IntCmd {
+	args := make([]any, 0, 2+len(members))
 	args = append(args, "srem", key)
 	args = append(args, members...)
 	cmd := redis.NewIntCmd(ctx, args...)
@@ -221,8 +221,8 @@ func (c *ClusterClient) SCard(ctx context.Context, key string) *redis.IntCmd {
 // Redis List operations
 
 // LPush inserts all the specified values at the head of the list stored at key
-func (c *ClusterClient) LPush(ctx context.Context, key string, values ...interface{}) *redis.IntCmd {
-	args := make([]interface{}, 0, 2+len(values))
+func (c *ClusterClient) LPush(ctx context.Context, key string, values ...any) *redis.IntCmd {
+	args := make([]any, 0, 2+len(values))
 	args = append(args, "lpush", key)
 	args = append(args, values...)
 	cmd := redis.NewIntCmd(ctx, args...)
@@ -381,8 +381,8 @@ func (c *ClusterClient) Close() error {
 
 // Helper functions
 
-func stringSliceToInterfaceSlice(slice []string) []interface{} {
-	result := make([]interface{}, len(slice))
+func stringSliceToInterfaceSlice(slice []string) []any {
+	result := make([]any, len(slice))
 	for i, v := range slice {
 		result[i] = v
 	}

@@ -29,16 +29,16 @@ type SubscriberInterface interface {
 
 // BaseEvent represents the common structure for all events
 type BaseEvent struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Timestamp time.Time              `json:"timestamp"`
-	Source    string                 `json:"source"`
-	UserID    string                 `json:"user_id,omitempty"`
-	Data      map[string]interface{} `json:"data"`
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Timestamp time.Time      `json:"timestamp"`
+	Source    string         `json:"source"`
+	UserID    string         `json:"user_id,omitempty"`
+	Data      map[string]any `json:"data"`
 }
 
 // NewEvent creates a new base event
-func NewEvent(eventType, source string, data map[string]interface{}) *BaseEvent {
+func NewEvent(eventType, source string, data map[string]any) *BaseEvent {
 	return &BaseEvent{
 		ID:        generateEventID(),
 		Type:      eventType,
