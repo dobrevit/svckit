@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/dobrevit/svckit v0.1.3
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/go-chi/chi/v5 v5.4.0
 )
 
 require (
