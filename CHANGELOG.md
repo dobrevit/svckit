@@ -41,6 +41,15 @@ releases.
   `svckit_outbox_oldest_unpublished_age_seconds`. `Run(ctx)` returns within
   `StopTimeout` of cancellation, committing what was published. Logs carry
   the id and routing key, never the body.
+- **An inbox claims a message id in the caller's transaction** (`inbox`).
+  *New package.* With at-least-once delivery a redelivered message was
+  handled twice. `inbox.Claim(ctx, ex, messageID, consumer)`, the first write
+  of the handling transaction, is an `INSERT … ON CONFLICT DO NOTHING`: false
+  means a duplicate to skip, and the claim commits or rolls back with the
+  work. A concurrent duplicate waits for the first transaction and follows
+  its outcome. Driver-neutral (no SQLSTATE parsing). `inbox.Purge` removes old
+  claims; `inbox.New(table)` for another table; DDL in `inbox.Schema(table)`
+  and `inbox/schema.sql`.
 
 ## [0.1.6] - 2026-11-15
 
