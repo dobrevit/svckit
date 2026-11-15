@@ -33,6 +33,19 @@ releases.
   it used to follow the producer's `ExpiresAt`. With the default on both
   sides nothing changes; otherwise set `EVENT_SIGNATURE_MAX_AGE` on the
   consumer.
+- **Messages can be signed with x509 certificates and verified against a
+  CA** (`eventbus/x509sig`). *Opt-in.* A shared HMAC key cannot say which
+  service signed a message, and cannot be revoked for one service. A
+  `x509sig.Signer` signs with a service's own ECDSA P-256 key and attaches its
+  certificate, taken from a `func() (*tls.Certificate, error)` so a renewing
+  source can feed it; a `x509sig.Verifier` checks the chain against configured
+  roots as of the signing time, the clock skew and maximum age, the signature
+  over the same canonical data HMAC covers (now exported as
+  `eventbus.CanonicalSigningData`), and that the service named in the
+  certificate's URI SAN may publish the event's type, from a required
+  allow-list. RSA, Ed25519 and other curves are refused. Revocation is by
+  short certificate lifetime, and the package documentation states the window
+  that leaves. Standard library only. `SignedEvent` gains `Certificate`.
 
 ### Fixed
 

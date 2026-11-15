@@ -46,6 +46,10 @@ type SignedEvent struct {
 	// Scheme names the signature scheme, so a verifier refuses a message
 	// signed with one it does not implement instead of misreading it.
 	Scheme string `json:"scheme,omitempty"`
+
+	// Certificate is the signer's leaf certificate (DER), for schemes that
+	// sign with a certificate's key (eventbus/x509sig). Empty for HMAC.
+	Certificate []byte `json:"certificate,omitempty"`
 }
 
 // Signer signs events. HMAC is the shared-key implementation; publishers
@@ -240,6 +244,15 @@ func verifyEventAt(signedEvent *SignedEvent, config *SignatureConfig, now time.T
 	}
 
 	return nil
+}
+
+// CanonicalSigningData is the byte sequence a signature covers: the event's
+// id, type, source, timestamp, user id and data, and the signing and expiry
+// times, as canonical JSON with sorted keys. HMAC signs it; another Signer
+// signs the same bytes, so that what is covered does not depend on the
+// scheme.
+func CanonicalSigningData(event *BaseEvent, signedAt, expiresAt time.Time) ([]byte, error) {
+	return createCanonicalEventData(event, signedAt, expiresAt)
 }
 
 // createCanonicalEventData creates a deterministic, canonical representation of event data for signing
