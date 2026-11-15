@@ -32,9 +32,12 @@ tag so an ordinary test run never reaches it:
 
 ```bash
 docker compose up -d --wait
-go test -race -tags integration ./...
+go test -race -tags integration -p 1 ./...
 docker compose down -v
 ```
+
+`-p 1` matters: some integration tests restart a broker or make it drop every
+connection, and packages run in parallel would see that as their own failure.
 
 Before pushing:
 

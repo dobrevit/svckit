@@ -79,6 +79,19 @@ releases.
   from `eventbus.Publisher` now carries the event id as the AMQP `MessageId`
   (it set only an `event_id` header), as `amqpcluster.ClusterPublisher`
   already did, so consumers can deduplicate on it.
+- **`eventbus.Publisher` publishes persistent messages.** *Default change.*
+  Its messages had no delivery mode, so they were transient, and a broker
+  restart lost them even from durable queues, while
+  `amqpcluster.ClusterPublisher` already published them persistent. Messages
+  now survive a restart, at the cost of a disk write each. The exchange and
+  queues svckit declares are durable, and a durable queue of transient
+  messages is almost never intended. **Migration:** pass the new
+  `eventbus.WithTransient()` to keep the old behaviour. The publisher
+  constructors take `...PublisherOption` (source-compatible for callers).
+- The integration tier runs one package at a time (`go test -tags integration
+  -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
+  drop every connection, which broke another package's tests running in
+  parallel.
 - `compose.yaml` gains `rabbitmq-test-2` (port 5674, `RABBITMQ_URL_2`), an
   independent second broker for the multi-node integration tests.
 

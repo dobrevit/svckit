@@ -101,7 +101,7 @@ jobs:
       - name: Test
         env:
           INTEGRATION_TESTS: "true"
-        run: go test -race -tags integration -count=1 ./...
+        run: go test -race -tags integration -p 1 -count=1 ./...
 
       - name: Test the submodules
         env:
@@ -109,7 +109,7 @@ jobs:
         run: |
           for m in testkit chix ginx; do
             echo "== $m =="
-            (cd "$m" && go test -race -tags integration -count=1 ./...)
+            (cd "$m" && go test -race -tags integration -p 1 -count=1 ./...)
           done
 
       - name: Dependency logs

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -129,4 +130,104 @@ func TestPublisherSetsTheMessageIDToTheEventID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// restartBroker restarts compose's rabbitmq-test and waits until it accepts
+// connections again.
+func restartBroker(t *testing.T) {
+	t.Helper()
+	out, err := exec.Command("docker", "compose", "restart", "rabbitmq-test").CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker compose restart rabbitmq-test: %v\n%s", err, out)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		conn, err := amqp.Dial(testRabbitURL())
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the broker did not come back within 60s: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// durableQueue declares a durable queue bound to the default exchange for one
+// event type, deleted when the test ends.
+func durableQueue(t *testing.T, eventType string) string {
+	t.Helper()
+	queue := fmt.Sprintf("svckit.it.durable.%s.%d", eventType, time.Now().UnixNano())
+	withBroker(t, func(ch *amqp.Channel) {
+		if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+			t.Fatalf("declare queue: %v", err)
+		}
+		if err := ch.QueueBind(queue, eventType, eventbus.DefaultExchange, false, nil); err != nil {
+			t.Fatalf("bind queue: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		withBroker(t, func(ch *amqp.Channel) { _, _ = ch.QueueDelete(queue, false, false, false) })
+	})
+	return queue
+}
+
+// Messages were transient, so a broker restart lost them even from a durable
+// queue. Persistent is now the default; WithTransient keeps the old behaviour.
+func TestPersistentMessagesSurviveABrokerRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	persistentPub, err := eventbus.NewPublisherWithService(testRabbitURL(), "eventbus-it")
+	if err != nil {
+		t.Fatalf("NewPublisherWithService: %v", err)
+	}
+	defer persistentPub.Close()
+	transientPub, err := eventbus.NewPublisherWithService(testRabbitURL(), "eventbus-it", eventbus.WithTransient())
+	if err != nil {
+		t.Fatalf("NewPublisherWithService(WithTransient): %v", err)
+	}
+	defer transientPub.Close()
+
+	persistentQueue := durableQueue(t, "it.persistent")
+	transientQueue := durableQueue(t, "it.transient")
+
+	if err := persistentPub.Publish(context.Background(), eventbus.NewEvent("it.persistent", "eventbus-it", nil)); err != nil {
+		t.Fatalf("publish persistent: %v", err)
+	}
+	if err := transientPub.Publish(context.Background(), eventbus.NewEvent("it.transient", "eventbus-it", nil)); err != nil {
+		t.Fatalf("publish transient: %v", err)
+	}
+	// Both must be in their queues before the restart, or the test proves nothing.
+	withBroker(t, func(ch *amqp.Channel) {
+		for _, q := range []string{persistentQueue, transientQueue} {
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				state, err := ch.QueueDeclarePassive(q, true, false, false, false, nil)
+				if err != nil {
+					t.Fatalf("inspect %s: %v", q, err)
+				}
+				if state.Messages == 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("%s holds %d messages before the restart, want 1", q, state.Messages)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	})
+
+	restartBroker(t)
+
+	withBroker(t, func(ch *amqp.Channel) {
+		if _, ok, err := ch.Get(persistentQueue, true); err != nil || !ok {
+			t.Errorf("the persistent message was lost in the restart (found %v, err %v)", ok, err)
+		}
+		if _, ok, err := ch.Get(transientQueue, true); err != nil || ok {
+			t.Errorf("the transient message survived the restart (found %v, err %v)", ok, err)
+		}
+	})
 }

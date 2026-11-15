@@ -1,7 +1,11 @@
 # Infrastructure for the integration tier.
 #
 #   docker compose up -d --wait
-#   go test -race -tags integration ./...
+#   go test -race -tags integration -p 1 ./...
+#
+# -p 1 runs one package at a time. Some tests restart a broker or make it drop
+# every connection, which would break another package's tests running at the
+# same moment against the same broker.
 #
 # The integration tests are behind the "integration" build tag, so a plain
 # `go test ./...` never reaches them and needs none of this running.

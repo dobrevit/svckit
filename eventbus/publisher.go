@@ -25,20 +25,35 @@ type Publisher struct {
 	serviceName    string
 	signer         *EventSigner
 	requireSigning bool
+	deliveryMode   uint8
+}
+
+// PublisherOption adjusts a Publisher when it is created.
+type PublisherOption func(*Publisher)
+
+// WithTransient publishes messages as transient (delivery mode 1) instead of
+// persistent: they cost no disk write, and a broker restart loses them even
+// from a durable queue. Persistent is the default because the exchange and
+// queues svckit declares are durable, and a durable queue of transient
+// messages is almost never what was meant; use this for messages that are
+// worthless after a restart, such as cache invalidations.
+func WithTransient() PublisherOption {
+	return func(p *Publisher) { p.deliveryMode = amqp.Transient }
 }
 
 // NewPublisher creates a new event publisher
-func NewPublisher(rabbitmqURL string) (*Publisher, error) {
-	return NewPublisherWithService(rabbitmqURL, "unknown")
+func NewPublisher(rabbitmqURL string, opts ...PublisherOption) (*Publisher, error) {
+	return NewPublisherWithService(rabbitmqURL, "unknown", opts...)
 }
 
 // NewPublisherWithService creates a new event publisher with service name
-func NewPublisherWithService(rabbitmqURL, serviceName string) (*Publisher, error) {
-	return NewPublisherWithSigning(rabbitmqURL, serviceName, nil, false)
+func NewPublisherWithService(rabbitmqURL, serviceName string, opts ...PublisherOption) (*Publisher, error) {
+	return NewPublisherWithSigning(rabbitmqURL, serviceName, nil, false, opts...)
 }
 
-// NewPublisherWithSigning creates a new event publisher with optional message signing
-func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *SignatureConfig, requireSigning bool) (*Publisher, error) {
+// NewPublisherWithSigning creates a new event publisher with optional message
+// signing. Messages are persistent unless WithTransient is given.
+func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *SignatureConfig, requireSigning bool, opts ...PublisherOption) (*Publisher, error) {
 	conn, err := amqp.Dial(rabbitmqURL)
 	if err != nil {
 		return nil, err
@@ -74,6 +89,10 @@ func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *Sig
 		serviceName:    serviceName,
 		signer:         signer,
 		requireSigning: requireSigning,
+		deliveryMode:   amqp.Persistent,
+	}
+	for _, opt := range opts {
+		opt(publisher)
 	}
 
 	// Update connection status
@@ -113,11 +132,12 @@ func (p *Publisher) Publish(ctx context.Context, event *BaseEvent) error {
 		false,           // mandatory
 		false,           // immediate
 		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
-			Headers:     headers,
-			Timestamp:   time.Now(),
-			MessageId:   event.ID,
+			ContentType:  "application/json",
+			Body:         body,
+			Headers:      headers,
+			Timestamp:    time.Now(),
+			MessageId:    event.ID,
+			DeliveryMode: p.deliveryMode,
 		},
 	)
 
@@ -168,11 +188,12 @@ func (p *Publisher) PublishSigned(ctx context.Context, event *BaseEvent) error {
 		false,           // mandatory
 		false,           // immediate
 		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
-			Headers:     headers,
-			Timestamp:   time.Now(),
-			MessageId:   event.ID,
+			ContentType:  "application/json",
+			Body:         body,
+			Headers:      headers,
+			Timestamp:    time.Now(),
+			MessageId:    event.ID,
+			DeliveryMode: p.deliveryMode,
 		},
 	)
 
