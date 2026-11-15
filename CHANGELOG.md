@@ -8,6 +8,23 @@ releases.
 
 ## [Unreleased]
 
+### Added
+
+- **An outbox writer stores a message in the caller's transaction**
+  (`outbox`). *New package.* A service that changed state and then published
+  did one after the other, so a crash between them lost the message or
+  published one for a change that rolled back. `outbox.Writer.Write(ctx,
+  ex, msg)` inserts the message through `ex`, an `outbox.Execer` (one
+  `ExecContext` method, which `*sql.Tx`, `*sql.DB` and an Ent transaction
+  satisfy, so svckit depends on no ORM), so it commits or rolls back with the
+  change. A message carries its id (the event id), exchange, routing key,
+  headers and body (stored byte for byte, already signed and sealed), an
+  optional `ExpiresAt`, and an optional `SubjectKey` for erasure:
+  `Writer.DeleteUnpublished` removes one subject's unsent messages.
+  `outbox.EventMessage` builds a message from an event as the publishers
+  would send it. The table name is configurable; consumers own the
+  migration, from `outbox.Schema(table)` or `outbox/schema.sql`.
+
 ## [0.1.6] - 2026-11-15
 
 Backlog items SK-16 to SK-22 (pluggable and certificate signatures, sealed
