@@ -1,8 +1,10 @@
 package pgcluster
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,10 @@ func LoadConfigFromEnv(serviceName string) (*ClusterConfig, error) {
 	if err := config.loadConnectionURLs(); err != nil {
 		return nil, err
 	}
+
+	// DB_DRIVER chooses the database/sql driver: "pgx" (the default) or
+	// "postgres" for lib/pq, which the caller must import.
+	config.DriverName = strings.TrimSpace(os.Getenv("DB_DRIVER"))
 
 	// Load writer detection settings
 	config.loadWriterDetectionSettings()
@@ -295,6 +301,10 @@ func (c *ClusterConfig) setDefaults() {
 func (c *ClusterConfig) Validate() error {
 	if c.WriterURL == "" {
 		return fmt.Errorf("writer URL is required")
+	}
+
+	if c.DriverName != "" && !slices.Contains(sql.Drivers(), c.DriverName) {
+		return fmt.Errorf("database driver %q is not registered: import it (for lib/pq, `import _ \"github.com/lib/pq\"`) or set DB_DRIVER=pgx", c.DriverName)
 	}
 
 	if c.ServiceName == "" {

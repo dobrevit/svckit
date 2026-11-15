@@ -185,6 +185,17 @@ releases.
   the body. Accepting an unsigned message stays a Warn where signatures are
   otherwise verified (`AllowUnsigned`), and is Debug on a subscriber that
   verifies nothing. Metrics are unchanged.
+- **`pgcluster` opens lib/pq or pgx by configuration, and SQLSTATE checks
+  work with either.** *Opt-in; the default stays pgx.*
+  `ClusterConfig.DriverName` existed, but `LoadConfigFromEnv` never set it,
+  so `app.WithDatabase` always opened pgx, and a service checking `*pq.Error`
+  for a unique violation silently stopped recognising it. `LoadConfigFromEnv`
+  now reads `DB_DRIVER` (`pgx`, or `postgres` for lib/pq, which the caller
+  imports), and `Validate` refuses a driver that is not registered, naming
+  the import. The new `pgcluster.SQLState(err)` and
+  `pgcluster.IsUniqueViolation(err)` read the code through any wrapping from
+  either driver's error, using the `SQLState()` method both implement, so
+  svckit does not import lib/pq.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in
