@@ -196,6 +196,14 @@ releases.
   `pgcluster.IsUniqueViolation(err)` read the code through any wrapping from
   either driver's error, using the `SQLState()` method both implement, so
   svckit does not import lib/pq.
+- **`app` can serve metrics and pprof on a separate operations listener.**
+  *Opt-in.* `app.Handler` mounted `/metrics` and, with `LOG_LEVEL=debug`,
+  pprof on the same mux as the service's routes, so a service that exposes
+  its routes exposed those too. `app.WithOpsListener(addr)` (or `OPS_ADDR`)
+  moves them to a second server, built from the new `App.OpsHandler()`, that
+  `Run` starts and shuts down with the first; `/health` and `/ready` stay on
+  the main listener, where orchestrators probe. `New` refuses an operations
+  address on the main port. Without the option nothing changes.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in

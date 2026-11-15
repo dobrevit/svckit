@@ -26,8 +26,10 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -53,6 +55,7 @@ type options struct {
 	wantAudit     bool
 	auditOptional bool
 	extraChecks   []middleware.HealthChecker
+	opsAddr       string
 }
 
 // Option configures which infrastructure New wires up.
@@ -112,6 +115,17 @@ func WithHealthCheck(check middleware.HealthChecker) Option {
 	return func(o *options) { o.extraChecks = append(o.extraChecks, check) }
 }
 
+// WithOpsListener serves /metrics and, with LOG_LEVEL=debug, the pprof
+// endpoints on a second listener at addr (such as ":9090") instead of on the
+// service's own: a service whose routes are exposed beyond the cluster then
+// does not expose those with them. Run starts the second server with the
+// first and shuts it down with it; /health and /ready stay on the main
+// listener, where orchestrators probe. Without this option OPS_ADDR is used,
+// and with neither nothing changes. New refuses an address on the main port.
+func WithOpsListener(addr string) Option {
+	return func(o *options) { o.opsAddr = addr }
+}
+
 // App holds the wired infrastructure for one service instance.
 type App struct {
 	Name        string
@@ -124,6 +138,10 @@ type App struct {
 	Audit       *audit.AuditClient
 	Health      *health.HealthChecker
 	Tomb        *lifecycle.Manager
+
+	// OpsAddr is the operations listener's address (WithOpsListener,
+	// OPS_ADDR); empty means /metrics and pprof are on the main listener.
+	OpsAddr string
 
 	pubRequired bool
 	extraChecks []middleware.HealthChecker
@@ -148,6 +166,13 @@ func New(name string, opts ...Option) (*App, error) {
 		Tomb:        lifecycle.NewManager(name),
 		pubRequired: o.wantPub && !o.pubOptional,
 		extraChecks: o.extraChecks,
+		OpsAddr:     o.opsAddr,
+	}
+	if a.OpsAddr == "" {
+		a.OpsAddr = env.String("OPS_ADDR", "")
+	}
+	if err := a.checkOpsAddr(); err != nil {
+		return nil, err
 	}
 
 	signing, err := eventbus.LoadSignatureConfig(nil)
@@ -278,19 +303,65 @@ func (a *App) SQLDB() *sql.DB { return a.sqlDB }
 //
 // CORS is deliberately absent: the allowed origins are a deployment policy,
 // so a service that needs them wraps the result in middleware.CORS itself.
+//
+// With an operations listener (WithOpsListener, OPS_ADDR), /metrics and the
+// profiling endpoints are served there instead, by OpsHandler.
 func (a *App) Handler(routes http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", routes)
 	mux.Handle("GET /health", middleware.HealthHandler(a.Name, a.HealthCheckers()...))
 	mux.Handle("GET /ready", middleware.ReadinessHandler(a.Name, a.ReadinessCheckers()...))
-	mux.Handle("GET "+middleware.MetricsPath, middleware.MetricsHandler())
-	debug.Register(mux)
+	if a.OpsAddr == "" {
+		registerOps(mux)
+	}
 
 	var handler http.Handler = mux
 	handler = middleware.RequestLogging(a.Name)(handler)
 	handler = middleware.Metrics(a.Name)(handler)
 	handler = middleware.Tracing()(handler)
 	return handler
+}
+
+// OpsHandler serves the operational endpoints that stay off the service's
+// own listener when there is an operations listener: /metrics, and the
+// profiling endpoints when LOG_LEVEL=debug. Run serves it on OpsAddr.
+func (a *App) OpsHandler() http.Handler {
+	mux := http.NewServeMux()
+	registerOps(mux)
+	return mux
+}
+
+func registerOps(mux *http.ServeMux) {
+	mux.Handle("GET "+middleware.MetricsPath, middleware.MetricsHandler())
+	debug.Register(mux)
+}
+
+// checkOpsAddr refuses an operations listener on the main port: both
+// servers would try to bind it.
+func (a *App) checkOpsAddr() error {
+	if a.OpsAddr == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(a.OpsAddr)
+	if err != nil {
+		return fmt.Errorf("operations listener address %q: %w", a.OpsAddr, err)
+	}
+	if port == a.Port {
+		return fmt.Errorf("operations listener %q is on the service's own port %s", a.OpsAddr, a.Port)
+	}
+	return nil
+}
+
+// opsServer is the operations listener's server.
+func (a *App) opsServer() *http.Server {
+	return &http.Server{
+		Addr:              a.OpsAddr,
+		Handler:           a.OpsHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		// pprof's profile endpoint streams for up to its seconds parameter
+		// (30 by default); no WriteTimeout, or it would be cut off.
+		IdleTimeout: 120 * time.Second,
+	}
 }
 
 // HealthCheckers reports on every dependency the service touches, including
@@ -338,6 +409,16 @@ func (a *App) Run(handler http.Handler, cleanup ...func() error) {
 	}
 
 	a.Tomb.StartHTTPServer(server, a.Port)
+	if a.OpsAddr != "" {
+		ops := a.opsServer()
+		a.Tomb.StartHTTPServer(ops, a.OpsAddr)
+		logging.Info("%s serving metrics and profiling on %s", a.Name, a.OpsAddr)
+		cleanup = append([]func() error{func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return ops.Shutdown(ctx)
+		}}, cleanup...)
+	}
 	logging.Info("🚀 %s starting on port %s", a.Name, a.Port)
 	a.Tomb.WaitForShutdownSignal(server, cleanup...)
 }
