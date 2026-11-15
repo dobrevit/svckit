@@ -87,3 +87,62 @@ func TestVerifyingSubscriberDeadLettersAnUnsignedMessage(t *testing.T) {
 		t.Errorf("the handler was called %d times for an unsigned message", n)
 	}
 }
+
+// The cluster publisher sets the AMQP message id to the event id, signed or
+// not, so a consumer can deduplicate on it.
+func TestClusterPublisherSetsTheMessageIDToTheEventID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	const id = "6c1e9a3b-55d2-4a7f-b0e8-91c4d2f7a316"
+	for name, signing := range map[string]*eventbus.SignatureConfig{"unsigned": nil, "signed": testSigning} {
+		t.Run(name, func(t *testing.T) {
+			pub, err := NewClusterPublisher([]string{testRabbitURL()}, "amqpcluster-it", signing)
+			if err != nil {
+				t.Fatalf("NewClusterPublisher: %v", err)
+			}
+			defer pub.Close()
+
+			eventType := "it.messageid." + name
+			queue := fmt.Sprintf("svckit.it.cluster-messageid.%s.%d", name, time.Now().UnixNano())
+			withBroker(t, func(ch *amqp.Channel) {
+				if _, err := ch.QueueDeclare(queue, false, false, false, false, nil); err != nil {
+					t.Fatalf("declare queue: %v", err)
+				}
+				if err := ch.QueueBind(queue, eventType, eventbus.DefaultExchange, false, nil); err != nil {
+					t.Fatalf("bind queue: %v", err)
+				}
+			})
+			t.Cleanup(func() {
+				withBroker(t, func(ch *amqp.Channel) { _, _ = ch.QueueDelete(queue, false, false, false) })
+			})
+
+			if err := pub.Publish(context.Background(), eventbus.NewEventWithID(id, eventType, "amqpcluster-it", nil)); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				var msg amqp.Delivery
+				var ok bool
+				withBroker(t, func(ch *amqp.Channel) {
+					msg, ok, err = ch.Get(queue, true)
+					if err != nil {
+						t.Fatalf("get: %v", err)
+					}
+				})
+				if ok {
+					if msg.MessageId != id {
+						t.Errorf("MessageId = %q, want the event id %q", msg.MessageId, id)
+					}
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the published message never arrived")
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		})
+	}
+}

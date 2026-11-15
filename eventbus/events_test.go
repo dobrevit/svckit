@@ -2,10 +2,12 @@ package eventbus_test
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dobrevit/svckit/eventbus"
+	"github.com/google/uuid"
 )
 
 func TestNewEventPopulatesTheEnvelope(t *testing.T) {
@@ -30,15 +32,60 @@ func TestNewEventPopulatesTheEnvelope(t *testing.T) {
 }
 
 // Deduplication downstream depends on IDs being unique, including for events
-// created in the same instant.
+// created in the same instant on many goroutines.
 func TestEventIDsAreUnique(t *testing.T) {
-	seen := make(map[string]bool, 1000)
-	for range 1000 {
-		id := eventbus.NewEvent("order.created", "orders", nil).ID
+	const workers, each = 10, 1000
+	ids := make(chan string, workers*each)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range each {
+				ids <- eventbus.NewEvent("order.created", "orders", nil).ID
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[string]bool, workers*each)
+	for id := range ids {
 		if seen[id] {
 			t.Fatalf("event ID %q was generated twice", id)
 		}
 		seen[id] = true
+	}
+	if len(seen) != workers*each {
+		t.Fatalf("%d distinct ids, want %d", len(seen), workers*each)
+	}
+}
+
+// An id is a database key (an outbox row, an inbox claim), so it has a
+// standard form rather than a timestamp and a few random letters.
+func TestEventIDsAreUUIDs(t *testing.T) {
+	id := eventbus.NewEvent("order.created", "orders", nil).ID
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		t.Fatalf("event id %q is not a UUID: %v", id, err)
+	}
+	if parsed.Version() != 4 {
+		t.Errorf("event id %q is a version %d UUID, want a random (v4) one", id, parsed.Version())
+	}
+}
+
+func TestNewEventWithIDKeepsTheID(t *testing.T) {
+	const id = "4b1f0f5e-7c0e-4e8a-9a51-3f2f1d0c9b77"
+	event := eventbus.NewEventWithID(id, "order.created", "orders", map[string]any{"order": "o-1"})
+
+	if event.ID != id {
+		t.Errorf("ID = %q, want the caller's %q", event.ID, id)
+	}
+	if event.Type != "order.created" || event.Source != "orders" || event.Data["order"] != "o-1" || event.Timestamp.IsZero() {
+		t.Errorf("the rest of the envelope was not populated: %+v", event)
+	}
+	if err := event.ValidateEvent(); err != nil {
+		t.Errorf("an event with a caller-supplied id does not validate: %v", err)
 	}
 }
 

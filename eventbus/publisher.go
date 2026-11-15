@@ -117,6 +117,7 @@ func (p *Publisher) Publish(ctx context.Context, event *BaseEvent) error {
 			Body:        body,
 			Headers:     headers,
 			Timestamp:   time.Now(),
+			MessageId:   event.ID,
 		},
 	)
 
@@ -171,6 +172,7 @@ func (p *Publisher) PublishSigned(ctx context.Context, event *BaseEvent) error {
 			Body:        body,
 			Headers:     headers,
 			Timestamp:   time.Now(),
+			MessageId:   event.ID,
 		},
 	)
 

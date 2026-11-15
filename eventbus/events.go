@@ -9,9 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // PublisherInterface defines the common interface for event publishers
@@ -37,10 +38,21 @@ type BaseEvent struct {
 	Data      map[string]any `json:"data"`
 }
 
-// NewEvent creates a new base event
+// NewEvent creates a new base event with a fresh random (version 4) UUID as
+// its id. The id is the AMQP message id of every publish of the event, and so
+// what a consumer deduplicates on.
 func NewEvent(eventType, source string, data map[string]any) *BaseEvent {
+	return NewEventWithID(generateEventID(), eventType, source, data)
+}
+
+// NewEventWithID creates an event with an id the caller chose. Use it when
+// the id must be known before the event exists or must survive a retry: an
+// outbox row's key, so that a consumer deduplicating by message id sees one
+// message however often the row is relayed. Any non-empty string is valid;
+// a UUID is the expected form.
+func NewEventWithID(id, eventType, source string, data map[string]any) *BaseEvent {
 	return &BaseEvent{
-		ID:        generateEventID(),
+		ID:        id,
 		Type:      eventType,
 		Timestamp: time.Now(),
 		Source:    source,
@@ -103,16 +115,9 @@ func (e *BaseEvent) GetEventAction() string {
 	return ""
 }
 
-// generateEventID generates a unique event identifier
+// generateEventID returns a random (version 4) UUID. It replaced a
+// nanosecond timestamp with eight characters from math/rand, which was not
+// built to be unique across processes and could not serve as a database key.
 func generateEventID() string {
-	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomString(8))
-}
-
-func randomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
+	return uuid.NewString()
 }

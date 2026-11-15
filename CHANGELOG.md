@@ -68,6 +68,17 @@ releases.
   `eventbus`'s `requireSigning`, or `Config.SigningRequired` through the new
   `amqpcluster.NewClusterSubscriberWithConfig`, which also applies the
   config's health interval, retries and load balancing.
+- **Event ids are UUIDs, and a caller can supply one.** *Default change.*
+  `eventbus.NewEvent` generated ids from a nanosecond timestamp and eight
+  characters from `math/rand`, which was not built to be unique across
+  processes and could not serve as a database key. Ids are now random
+  (version 4) UUIDs. A consumer that parsed the old timestamp prefix will
+  notice; nothing in svckit did, and `ValidateEvent` still accepts any
+  non-empty id. The new `eventbus.NewEventWithID(id, type, source, data)`
+  keeps an id the caller chose, such as an outbox row's key. Every publish
+  from `eventbus.Publisher` now carries the event id as the AMQP `MessageId`
+  (it set only an `event_id` header), as `amqpcluster.ClusterPublisher`
+  already did, so consumers can deduplicate on it.
 - `compose.yaml` gains `rabbitmq-test-2` (port 5674, `RABBITMQ_URL_2`), an
   independent second broker for the multi-node integration tests.
 
