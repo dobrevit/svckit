@@ -134,7 +134,7 @@ func (h *recordingHandler) Handle(context.Context, *eventbus.BaseEvent) error {
 // header to its handler, so anyone who could publish to the exchange skipped
 // verification by leaving the header out. app.New builds this subscriber.
 func TestVerifyingSubscriberDeadLettersUnsignedMessages(t *testing.T) {
-	cs := &ClusterSubscriber{verifier: eventbus.NewEventVerifier(testSigning), serviceName: "billing"}
+	cs := subscriberOn(nil, "billing", testSigning, false)
 
 	for name, d := range map[string]amqp.Delivery{
 		"no header":     unsignedDelivery(t, nil),
@@ -165,7 +165,7 @@ func TestVerifyingSubscriberDeadLettersUnsignedMessages(t *testing.T) {
 }
 
 func TestAllowUnsignedLetsUnsignedMessagesThrough(t *testing.T) {
-	cs := &ClusterSubscriber{verifier: eventbus.NewEventVerifier(testSigning), serviceName: "billing"}
+	cs := subscriberOn(nil, "billing", testSigning, false)
 	d := unsignedDelivery(t, nil)
 	h := &recordingHandler{}
 

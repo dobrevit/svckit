@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/dobrevit/svckit/internal/amqpconfirm"
+	"github.com/dobrevit/svckit/internal/inflight"
 	"github.com/dobrevit/svckit/internal/retry"
 	"github.com/dobrevit/svckit/logging"
+	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -299,6 +301,31 @@ type Subscriber struct {
 	// its own in confirm mode; created by the first subscription with one.
 	retrierMu sync.Mutex
 	retrier   *amqpconfirm.Publisher
+
+	// handlers tracks the handlers running, for Close to drain.
+	handlers     *inflight.Tracker
+	closeTimeout time.Duration
+
+	consumersMu sync.Mutex
+	consumers   []string // consumer tags, for Close to cancel
+}
+
+// DefaultCloseTimeout is how long Close waits for running handlers before
+// it cancels their context.
+const DefaultCloseTimeout = 10 * time.Second
+
+// DefaultHandlerTimeout bounds one call of an eventbus handler unless
+// SubscribeOptions.HandlerTimeout says otherwise.
+const DefaultHandlerTimeout = 30 * time.Second
+
+// SubscriberOption adjusts a Subscriber when it is created.
+type SubscriberOption func(*Subscriber)
+
+// WithCloseTimeout sets how long Close waits for handlers still running
+// before it cancels their context (default DefaultCloseTimeout). A handler
+// cancelled this way has its message requeued.
+func WithCloseTimeout(d time.Duration) SubscriberOption {
+	return func(s *Subscriber) { s.closeTimeout = d }
 }
 
 // RetryPolicy retries a message whose handler failed with a retryable error
@@ -307,17 +334,17 @@ type Subscriber struct {
 type RetryPolicy = retry.Policy
 
 // NewSubscriber creates a new event subscriber
-func NewSubscriber(rabbitmqURL string) (*Subscriber, error) {
-	return NewSubscriberWithService(rabbitmqURL, "unknown")
+func NewSubscriber(rabbitmqURL string, opts ...SubscriberOption) (*Subscriber, error) {
+	return NewSubscriberWithService(rabbitmqURL, "unknown", opts...)
 }
 
 // NewSubscriberWithService creates a new event subscriber with service name
-func NewSubscriberWithService(rabbitmqURL, serviceName string) (*Subscriber, error) {
-	return NewSubscriberWithSigning(rabbitmqURL, serviceName, nil, false)
+func NewSubscriberWithService(rabbitmqURL, serviceName string, opts ...SubscriberOption) (*Subscriber, error) {
+	return NewSubscriberWithSigning(rabbitmqURL, serviceName, nil, false, opts...)
 }
 
 // NewSubscriberWithSigning creates a new event subscriber with optional signature verification
-func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *SignatureConfig, requireSigning bool) (*Subscriber, error) {
+func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *SignatureConfig, requireSigning bool, opts ...SubscriberOption) (*Subscriber, error) {
 	conn, err := amqp.Dial(rabbitmqURL)
 	if err != nil {
 		return nil, err
@@ -339,6 +366,11 @@ func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *Si
 		serviceName:    serviceName,
 		verifier:       verifier,
 		requireSigning: requireSigning,
+		handlers:       inflight.New(),
+		closeTimeout:   DefaultCloseTimeout,
+	}
+	for _, opt := range opts {
+		opt(subscriber)
 	}
 
 	// Update connection status
@@ -388,6 +420,16 @@ type SubscribeOptions struct {
 	// without a policy, and RabbitMQ refuses to redeclare a queue with
 	// different arguments: enable Retry on a new queue, not an existing one.
 	Retry *RetryPolicy
+
+	// Context is the parent of every handler call's context; nil means
+	// context.Background(). Close cancels the handlers either way, once its
+	// timeout (WithCloseTimeout) has passed.
+	Context context.Context
+
+	// HandlerTimeout bounds one handler call. Zero means
+	// DefaultHandlerTimeout (30 seconds, as before); a negative value means
+	// no limit.
+	HandlerTimeout time.Duration
 }
 
 // NoQueueTTL as a QueueTTL (eventbus.SubscribeOptions,
@@ -514,10 +556,11 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 	}
 
 	// Consume messages with manual acknowledgment
+	consumerTag := fmt.Sprintf("%s-%s-%s", s.serviceName, q.Name, uuid.NewString()[:8])
 	msgs, err := s.channel.Consume(
-		q.Name, // queue
-		"",     // consumer
-		false,  // auto-ack (changed to false)
+		q.Name,      // queue
+		consumerTag, // consumer, named so that Close can cancel it
+		false,       // auto-ack (changed to false)
 		false,  // exclusive
 		false,  // no-local
 		false,  // no-wait
@@ -526,11 +569,26 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 	if err != nil {
 		return err
 	}
+	s.consumersMu.Lock()
+	s.consumers = append(s.consumers, consumerTag)
+	s.consumersMu.Unlock()
+
+	handlerTimeout := opts.HandlerTimeout
+	if handlerTimeout == 0 {
+		handlerTimeout = DefaultHandlerTimeout
+	}
 
 	// Process messages with proper error handling
 	go func() {
 		for d := range msgs {
+			// Once Close has begun, a message already delivered goes back to
+			// the queue instead of to a handler.
+			if !s.handlers.Begin() {
+				nack(d, true)
+				continue
+			}
 			func() {
+				defer s.handlers.End()
 				defer func() {
 					if r := recover(); r != nil {
 						logging.Error("Panic handling event: %v", r)
@@ -566,7 +624,7 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 				// Start timing the processing
 				processingStart := time.Now()
 
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				ctx, cancel := s.handlers.HandlerContext(opts.Context, handlerTimeout)
 				defer cancel()
 				ctx = WithAttempt(ctx, retry.Attempt(d))
 
@@ -575,6 +633,15 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 
 					// Record processing duration even for failures
 					EventProcessingDuration.WithLabelValues(event.Type, s.serviceName, queueName).Observe(time.Since(processingStart).Seconds())
+
+					// Cancelled by Close: the work was not finished, so the
+					// message goes back to the queue whatever the error says.
+					if s.handlers.Cancelled().Err() != nil {
+						RecordEventRequeued(event.Type, s.serviceName, queueName)
+						RecordEventProcessed(event.Type, s.serviceName, queueName, "requeued")
+						nack(d, true)
+						return
+					}
 
 					if opts.Retry != nil {
 						s.retryOrDeadLetter(retrier, *opts.Retry, d, event, queueName, isRetryableError(err))
@@ -691,9 +758,34 @@ func guessedRetryable(err error) bool {
 }
 
 // Close closes the subscriber connection
+// Close stops the subscriber. It stops handing messages to handlers (one
+// already delivered goes back to its queue), cancels its consumers, and
+// waits for running handlers up to the close timeout (WithCloseTimeout);
+// then it cancels their context, gives them up to a second more, and closes
+// the channel. A handler that returns after the cancellation has its
+// message requeued, and the broker requeues the message of one that never
+// returns when the channel closes. Close returns within the close timeout
+// plus that second.
 func (s *Subscriber) Close() error {
 	// Update connection status
 	UpdateConnectionStatus(s.serviceName, "subscriber", false)
+
+	if s.handlers != nil {
+		s.handlers.Stop()
+		s.consumersMu.Lock()
+		consumers := append([]string(nil), s.consumers...)
+		s.consumersMu.Unlock()
+		if s.channel != nil {
+			for _, tag := range consumers {
+				if err := s.channel.Cancel(tag, false); err != nil {
+					logging.Warn("Failed to cancel consumer %s: %v", tag, err)
+				}
+			}
+		}
+		if !s.handlers.Drain(s.closeTimeout) {
+			logging.Warn("A handler did not return within the close timeout and after cancellation; its message is requeued when the channel closes")
+		}
+	}
 
 	var errs []error
 	if s.channel != nil {

@@ -155,6 +155,26 @@ releases.
   `eventbus.Attempt(ctx)`. Without a policy nothing changes. Enable it on a
   new queue: the main queue's dead-letter arguments differ, and RabbitMQ
   refuses to redeclare an existing queue with different arguments.
+- **Handlers run on a context `Close` cancels, with a configurable timeout,
+  and `Close` waits for them.** *Small default change.* `eventbus` ran each
+  handler on `context.Background()` with a fixed 30-second timeout, and
+  `amqpcluster` on `context.Background()` with none; neither was cancelled on
+  `Close`, and `eventbus.Subscriber.Close` did not wait for a handler in
+  flight, so a shutdown cut a handler off mid-work or left it running past
+  the process's grace period. Now `Close`, in both subscribers, stops handing
+  messages to handlers (one already delivered goes back to its queue),
+  cancels the consumers, waits for running handlers up to a close timeout
+  (`WithCloseTimeout`, a new constructor option in both packages, default
+  10 s), then cancels their context; a handler cancelled that way has its
+  message requeued. `Close` returns within the close timeout plus a second,
+  even with a handler that ignores its context (the broker requeues its
+  message when the channel closes). New per subscription:
+  `Context` (the handlers' parent) and `HandlerTimeout` (`eventbus`: zero
+  keeps 30 s, negative means none; `amqpcluster`: zero keeps none).
+  **What changes:** a handler still running when `Close` is called now sees
+  its context cancelled after the close timeout instead of running on.
+  Timeouts are otherwise unchanged. The subscriber constructors take
+  `...SubscriberOption` (source-compatible for callers).
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in

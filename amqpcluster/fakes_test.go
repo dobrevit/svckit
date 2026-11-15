@@ -66,6 +66,7 @@ type fakeChannel struct {
 	declared  []string
 	queueArgs map[string]amqp.Table
 	onPublish func(routingKey string)
+	cancelled []string // consumer tags
 	closeOnce sync.Once
 }
 
@@ -123,6 +124,19 @@ func (ch *fakeChannel) QueueDeclare(name string, _, _, _, _ bool, args amqp.Tabl
 
 func (ch *fakeChannel) QueueBind(name, key, exchange string, _ bool, _ amqp.Table) error {
 	return ch.record("binding " + name + " " + exchange + " " + key)
+}
+
+// Cancel ends a consumer: its deliveries channel closes, as the client's
+// does once the broker confirms the cancel.
+func (ch *fakeChannel) Cancel(consumer string, _ bool) error {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if d, ok := ch.consumers[consumer]; ok {
+		close(d)
+		delete(ch.consumers, consumer)
+		ch.cancelled = append(ch.cancelled, consumer)
+	}
+	return nil
 }
 
 func (ch *fakeChannel) Qos(prefetch, _ int, _ bool) error {
@@ -197,6 +211,15 @@ func (s settled) Done() <-chan struct{} {
 }
 
 func (s settled) Acked() bool { return s.ack }
+
+// deliverTo hands one delivery to every consumer on the channel.
+func (ch *fakeChannel) deliverTo(d amqp.Delivery) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	for _, c := range ch.consumers {
+		c <- d
+	}
+}
 
 // deliver hands a message to every consumer on the channel.
 func (ch *fakeChannel) deliver(body string) {

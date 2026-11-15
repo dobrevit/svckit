@@ -136,7 +136,7 @@ func (ca *ClusterAdapter) consumeOnNode(node *Node, s *subscription) error {
 		}
 	}
 
-	msgs, err := ch.Consume(s.queue, fmt.Sprintf("%s-%s", s.consumerTag, node.Name),
+	msgs, err := ch.Consume(s.queue, consumerTagOn(s, node),
 		s.autoAck, s.exclusive, s.noLocal, s.noWait, s.args)
 	if err != nil {
 		return err
@@ -156,6 +156,40 @@ func (ca *ClusterAdapter) consumeOnNode(node *Node, s *subscription) error {
 	ca.forwarders.Add(1)
 	go ca.forward(node, s, msgs)
 	return nil
+}
+
+// consumerTagOn is the consumer tag of s on one node.
+func consumerTagOn(s *subscription, node *Node) string {
+	return fmt.Sprintf("%s-%s", s.consumerTag, node.Name)
+}
+
+// cancelConsumers stops every subscription: the broker stops delivering,
+// and a node that reconnects does not start them again. Their delivery
+// channels stay open until Close. A subscriber cancels before it drains its
+// handlers, so that nothing new arrives while it waits; messages the broker
+// already sent and nothing acknowledged are requeued when the channel
+// closes.
+func (ca *ClusterAdapter) cancelConsumers() {
+	_, subscriptions := ca.registry.snapshot()
+	for _, s := range subscriptions {
+		ca.registry.removeSubscription(s)
+	}
+
+	ca.mutex.RLock()
+	nodes := append([]*Node(nil), ca.nodes...)
+	ca.mutex.RUnlock()
+	for _, node := range nodes {
+		node.consumeMu.Lock()
+		for s, ch := range node.consumers {
+			if !ch.IsClosed() {
+				if err := ch.Cancel(consumerTagOn(s, node), false); err != nil {
+					logging.Warn("Failed to cancel consumer of %s on node %s: %v", s.queue, node.Name, err)
+				}
+			}
+			delete(node.consumers, s)
+		}
+		node.consumeMu.Unlock()
+	}
 }
 
 // forward moves one node's deliveries for s to s.out. It ends when the

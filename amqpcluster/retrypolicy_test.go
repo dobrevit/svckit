@@ -18,7 +18,7 @@ var testPolicy = &eventbus.RetryPolicy{Delays: []time.Duration{time.Second, 2 * 
 // the message.
 func TestTheRetryIsPublishedBeforeTheOriginalIsAcked(t *testing.T) {
 	ca, nodes, _ := clusterOf(t, 1, "rabbit-1")
-	cs := &ClusterSubscriber{cluster: ca, serviceName: "billing"}
+	cs := subscriberOn(ca, "billing", nil, false)
 
 	var mu sync.Mutex
 	var order []string
@@ -43,7 +43,7 @@ func TestTheRetryIsPublishedBeforeTheOriginalIsAcked(t *testing.T) {
 // handled again, not lost and not acknowledged.
 func TestAFailedRepublishRequeuesTheOriginal(t *testing.T) {
 	ca, nodes, _ := clusterOf(t, 1, "rabbit-1")
-	cs := &ClusterSubscriber{cluster: ca, serviceName: "billing"}
+	cs := subscriberOn(ca, "billing", nil, false)
 	_ = publishChannel(nodes[0]).Close()
 
 	d := unsignedDelivery(t, nil)
@@ -58,7 +58,7 @@ func TestAFailedRepublishRequeuesTheOriginal(t *testing.T) {
 
 func TestHandlersSeeTheirAttempt(t *testing.T) {
 	ca, _, _ := clusterOf(t, 1, "rabbit-1")
-	cs := &ClusterSubscriber{cluster: ca, serviceName: "billing"}
+	cs := subscriberOn(ca, "billing", nil, false)
 
 	var seen int
 	handler := handlerFunc(func(ctx context.Context, _ *eventbus.BaseEvent) error {

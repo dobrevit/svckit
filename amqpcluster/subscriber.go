@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dobrevit/svckit/eventbus"
+	"github.com/dobrevit/svckit/internal/inflight"
 	"github.com/dobrevit/svckit/internal/retry"
 	"github.com/dobrevit/svckit/logging"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -28,19 +29,37 @@ type ClusterSubscriber struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// handlers tracks the handlers running, for Close to drain.
+	handlers     *inflight.Tracker
+	closeTimeout time.Duration
+}
+
+// DefaultCloseTimeout is how long Close waits for running handlers before
+// it cancels their context.
+const DefaultCloseTimeout = 10 * time.Second
+
+// SubscriberOption adjusts a ClusterSubscriber when it is created.
+type SubscriberOption func(*ClusterSubscriber)
+
+// WithCloseTimeout sets how long Close waits for handlers still running
+// before it cancels their context (default DefaultCloseTimeout). A handler
+// cancelled this way has its message requeued.
+func WithCloseTimeout(d time.Duration) SubscriberOption {
+	return func(cs *ClusterSubscriber) { cs.closeTimeout = d }
 }
 
 // NewClusterSubscriber creates a new cluster-aware event subscriber. With a
 // signing config it verifies signed messages and dead-letters unsigned ones;
 // see SubscriptionOptions.AllowUnsigned for the exception.
-func NewClusterSubscriber(nodes []string, serviceName string, signingConfig *eventbus.SignatureConfig) (*ClusterSubscriber, error) {
+func NewClusterSubscriber(nodes []string, serviceName string, signingConfig *eventbus.SignatureConfig, opts ...SubscriberOption) (*ClusterSubscriber, error) {
 	return newClusterSubscriber(ClusterConfig{
 		Nodes:               nodes,
 		ServiceName:         serviceName,
 		HealthCheckInterval: 30 * time.Second,
 		RetryAttempts:       3,
 		LoadBalanceStrategy: "round_robin",
-	}, signingConfig, false)
+	}, signingConfig, false, opts)
 }
 
 // NewClusterSubscriberWithConfig creates a subscriber from a Config, as
@@ -49,7 +68,7 @@ func NewClusterSubscriber(nodes []string, serviceName string, signingConfig *eve
 // has no way to take. With SigningRequired, unsigned messages are
 // dead-lettered and a subscription asking for AllowUnsigned is refused, so a
 // deployment's policy cannot be relaxed in code.
-func NewClusterSubscriberWithConfig(config Config) (*ClusterSubscriber, error) {
+func NewClusterSubscriberWithConfig(config Config, opts ...SubscriberOption) (*ClusterSubscriber, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -68,15 +87,24 @@ func NewClusterSubscriberWithConfig(config Config) (*ClusterSubscriber, error) {
 		HealthCheckInterval: config.HealthCheckInterval,
 		RetryAttempts:       config.RetryAttempts,
 		LoadBalanceStrategy: config.LoadBalanceStrategy,
-	}, signingConfig, config.SigningRequired)
+	}, signingConfig, config.SigningRequired, opts)
 }
 
-func newClusterSubscriber(config ClusterConfig, signingConfig *eventbus.SignatureConfig, signingRequired bool) (*ClusterSubscriber, error) {
-	serviceName := config.ServiceName
+func newClusterSubscriber(config ClusterConfig, signingConfig *eventbus.SignatureConfig, signingRequired bool, opts []SubscriberOption) (*ClusterSubscriber, error) {
 	cluster, err := NewClusterAdapter(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cluster adapter: %w", err)
 	}
+	subscriber := subscriberOn(cluster, config.ServiceName, signingConfig, signingRequired)
+	for _, opt := range opts {
+		opt(subscriber)
+	}
+	return subscriber, nil
+}
+
+// subscriberOn builds a subscriber over an adapter that is already
+// connected.
+func subscriberOn(cluster *ClusterAdapter, serviceName string, signingConfig *eventbus.SignatureConfig, signingRequired bool) *ClusterSubscriber {
 
 	// Initialize verifier if provided
 	var verifier *eventbus.EventVerifier
@@ -96,9 +124,11 @@ func newClusterSubscriber(config ClusterConfig, signingConfig *eventbus.Signatur
 		cancel:      cancel,
 
 		signingRequired: signingRequired,
+		handlers:        inflight.New(),
+		closeTimeout:    DefaultCloseTimeout,
 	}
 
-	return subscriber, nil
+	return subscriber
 }
 
 // Subscribe subscribes to events with a specific routing pattern
@@ -141,6 +171,15 @@ type SubscriptionOptions struct {
 	// after it. Enable it on a new queue: an existing one cannot be
 	// redeclared with the dead-letter arguments it needs.
 	Retry *eventbus.RetryPolicy
+
+	// Context is the parent of every handler call's context; nil means
+	// context.Background(). Close cancels the handlers either way, once its
+	// timeout (WithCloseTimeout) has passed.
+	Context context.Context
+
+	// HandlerTimeout bounds one handler call; zero means no limit, as
+	// before.
+	HandlerTimeout time.Duration
 
 	// AllowUnsigned lets unsigned messages reach the handler (with a Warn)
 	// even though the subscriber verifies signatures. Without it they are
@@ -268,7 +307,16 @@ func (cs *ClusterSubscriber) processMessages(queueName string, msgs <-chan amqp.
 				logging.Info("Messages channel closed, stopping message processing")
 				return
 			}
+			// Once Close has begun, a message already delivered goes back to
+			// the queue instead of to the handler.
+			if !cs.handlers.Begin() {
+				if !opts.AutoAck {
+					nack(delivery, true)
+				}
+				continue
+			}
 			cs.handleMessage(queueName, delivery, handler, opts)
+			cs.handlers.End()
 		case <-cs.ctx.Done():
 			logging.Info("Message processing stopped due to context cancellation")
 			return
@@ -310,7 +358,9 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 	}
 
 	// Create context for handler
-	ctx := eventbus.WithAttempt(context.Background(), retry.Attempt(delivery))
+	ctx, cancel := cs.handlers.HandlerContext(opts.Context, opts.HandlerTimeout)
+	defer cancel()
+	ctx = eventbus.WithAttempt(ctx, retry.Attempt(delivery))
 	if userID, ok := delivery.Headers["user_id"]; ok {
 		if userIDStr, ok := userID.(string); ok && userIDStr != "" {
 			ctx = eventbus.WithUserID(ctx, userIDStr)
@@ -320,6 +370,12 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 	// Call the event handler
 	if err := handler.Handle(ctx, event); err != nil {
 		logging.Error("Handler failed to process event %s: %v", event.Type, err)
+		// Cancelled by Close: the work was not finished, so the message goes
+		// back to the queue whatever the error says.
+		if !autoAck && cs.handlers.Cancelled().Err() != nil {
+			nack(delivery, true)
+			return
+		}
 		if !autoAck && opts.Retry != nil {
 			cs.retryOrDeadLetter(*opts.Retry, delivery, event, queueName, cs.isRetryableError(err))
 			return
@@ -461,12 +517,36 @@ type SubscriberStats struct {
 }
 
 // Close gracefully shuts down the subscriber
+// Close stops the subscriber. It stops handing messages to handlers (one
+// already delivered goes back to its queue), cancels its consumers, and
+// waits for running handlers up to the close timeout (WithCloseTimeout);
+// then it cancels their context, gives them up to a second more, and closes
+// the adapter. A handler that returns after the cancellation has its
+// message requeued, and the broker requeues the message of one that never
+// returns when the channel closes. Close returns within the close timeout
+// plus that second.
 func (cs *ClusterSubscriber) Close() error {
-	// Stop background tasks
-	cs.cancel()
+	cs.handlers.Stop()
+	if cs.cluster != nil {
+		cs.cluster.cancelConsumers()
+	}
+	if !cs.handlers.Drain(cs.closeTimeout) {
+		logging.Warn("A handler did not return within the close timeout and after cancellation; its message is requeued when the channel closes")
+	}
 
-	// Wait for all background tasks to complete
-	cs.wg.Wait()
+	// Stop the processing loops. A loop still inside a handler that ignored
+	// its context is left behind; closing the adapter closes its delivery
+	// channel, so it ends when that handler does.
+	cs.cancel()
+	done := make(chan struct{})
+	go func() {
+		cs.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(inflight.Grace):
+	}
 
 	// Close the cluster adapter
 	if cs.cluster != nil {

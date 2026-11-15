@@ -312,3 +312,126 @@ func TestRetryPolicy(t *testing.T) {
 		})
 	})
 }
+
+// subscribeOne declares a fresh queue for its own routing key, subscribes h
+// to it on a new subscriber, and publishes one event there.
+func subscribeOne(t *testing.T, h eventbus.EventHandler, opts eventbus.SubscribeOptions, closeTimeout time.Duration) (*eventbus.Subscriber, string) {
+	t.Helper()
+	queue := fmt.Sprintf("svckit.it.close.%d", time.Now().UnixNano())
+	withBroker(t, func(ch *amqp.Channel) {
+		if err := ch.ExchangeDeclare(eventbus.DefaultExchange, "topic", true, false, false, false, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Cleanup(func() {
+		withBroker(t, func(ch *amqp.Channel) {
+			_, _ = ch.QueueDelete(queue, false, false, false)
+			_, _ = ch.QueueDelete(queue+".dlq", false, false, false)
+		})
+	})
+
+	sub, err := eventbus.NewSubscriberWithService(testRabbitURL(), "eventbus-it", eventbus.WithCloseTimeout(closeTimeout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.SubscribeWithOptions(queue, queue, h, opts); err != nil {
+		t.Fatal(err)
+	}
+	withBroker(t, func(ch *amqp.Channel) {
+		body, _ := json.Marshal(eventbus.NewEvent(queue, "eventbus-it", nil))
+		if err := ch.Publish(eventbus.DefaultExchange, queue, false, false, amqp.Publishing{Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return sub, queue
+}
+
+// Handlers ran on context.Background() with a fixed 30 s timeout, and Close
+// neither cancelled them nor waited for them.
+func TestCloseCancelsARunningHandlerAndItsMessageIsRedelivered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	started := make(chan struct{}, 1)
+	returned := make(chan error, 1)
+	handler := handlerFunc(func(ctx context.Context, _ *eventbus.BaseEvent) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		returned <- ctx.Err()
+		return ctx.Err()
+	})
+	sub, queue := subscribeOne(t, handler, eventbus.SubscribeOptions{}, 200*time.Millisecond)
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started")
+	}
+	start := time.Now()
+	if err := sub.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond+2*time.Second {
+		t.Errorf("Close took %v", elapsed)
+	}
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the handler saw %v, want its context cancelled", err)
+		}
+	default:
+		t.Fatal("the handler had not returned when Close did")
+	}
+
+	waitFor(t, 5*time.Second, "the unfinished message back in its queue", func() bool { return messagesIn(t, queue) == 1 })
+	if n := messagesIn(t, queue+".dlq"); n != 0 {
+		t.Errorf("the cancelled message was dead-lettered (%d in the DLQ)", n)
+	}
+}
+
+func TestCloseIsBoundedWhenAHandlerIgnoresItsContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	handler := handlerFunc(func(context.Context, *eventbus.BaseEvent) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	})
+	sub, queue := subscribeOne(t, handler, eventbus.SubscribeOptions{}, 200*time.Millisecond)
+	<-started
+
+	start := time.Now()
+	_ = sub.Close()
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond+1500*time.Millisecond {
+		t.Errorf("Close took %v with a handler that ignores its context", elapsed)
+	}
+	// Closing the channel requeued the message nobody acknowledged.
+	waitFor(t, 5*time.Second, "the abandoned message back in its queue", func() bool { return messagesIn(t, queue) == 1 })
+}
+
+func TestHandlerTimeoutBoundsAHandlerCall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	got := make(chan error, 1)
+	handler := handlerFunc(func(ctx context.Context, _ *eventbus.BaseEvent) error {
+		<-ctx.Done()
+		got <- ctx.Err()
+		return eventbus.Permanent(ctx.Err())
+	})
+	sub, _ := subscribeOne(t, handler, eventbus.SubscribeOptions{HandlerTimeout: 100 * time.Millisecond}, time.Second)
+	defer sub.Close()
+
+	select {
+	case err := <-got:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("the handler saw %v, want its deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler was not cancelled by its timeout")
+	}
+}

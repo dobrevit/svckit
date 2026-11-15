@@ -15,7 +15,7 @@ func (h failingHandler) Handle(context.Context, *eventbus.BaseEvent) error { ret
 
 // What the handler says decides, not the words in its error.
 func TestHandlerMarksDecideRequeue(t *testing.T) {
-	cs := &ClusterSubscriber{serviceName: "billing"}
+	cs := subscriberOn(nil, "billing", nil, false)
 	for name, tc := range map[string]struct {
 		err     error
 		requeue bool
