@@ -8,6 +8,14 @@ releases.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-15
+
+Backlog items SK-16 to SK-22 (pluggable and certificate signatures, sealed
+payloads, TLS with certificate authentication, and Vault) and the
+`rediscluster` fix RC-1. Everything here is opt-in except the one edge case
+of the signature age limit, noted below. `vaultx` is a new module, released
+as v0.1.6 with `testkit`, `chix` and `ginx`, each requiring svckit v0.1.6.
+
 ### Added
 
 - **Signing is an interface; HMAC is one implementation, with a configurable
@@ -581,7 +589,8 @@ It remains the record of what the toolkit contains.
   without this module depending on OpenTelemetry.
 - The main module depends on no web framework and no ORM.
 
-[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/dobrevit/svckit/releases/tag/v0.1.6
 [0.1.5]: https://github.com/dobrevit/svckit/releases/tag/v0.1.5
 [0.1.4]: https://github.com/dobrevit/svckit/releases/tag/v0.1.4
 [0.1.3]: https://github.com/dobrevit/svckit/releases/tag/v0.1.3

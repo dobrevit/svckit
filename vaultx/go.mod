@@ -3,8 +3,8 @@ module github.com/dobrevit/svckit/vaultx
 go 1.26.0
 
 require (
-	github.com/dobrevit/svckit v0.1.5
-	github.com/dobrevit/svckit/testkit v0.1.5
+	github.com/dobrevit/svckit v0.1.6
+	github.com/dobrevit/svckit/testkit v0.1.6
 )
 
 require (
