@@ -8,6 +8,17 @@ releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`amqpcluster` no longer stops publishing when a node's connection drops.**
+  The health check took the node's lock and then reconnected through a
+  function that took the same lock again, so the first closed connection hung
+  the health goroutine with the lock held, and every `Publish` after it
+  blocked. The reconnect now dials outside the lock and swaps the connection
+  in under it, so a slow dial no longer stalls node selection either; two
+  reconnects of one node no longer race, and a reconnect that finishes after
+  `Close` is discarded instead of leaked. *Fix; no API change.*
+
 ## [0.1.4] - 2026-11-15
 
 A dependency and security release: no svckit API or behaviour changed.

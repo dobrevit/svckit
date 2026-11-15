@@ -27,13 +27,18 @@ const (
 type Node struct {
 	URL         string
 	Name        string
-	conn        *amqp.Connection
-	publishCh   *amqp.Channel
-	subscribeCh *amqp.Channel
+	conn        amqpConnection
+	publishCh   amqpChannel
+	subscribeCh amqpChannel
 	state       NodeState
 	lastError   error
 	lastCheck   time.Time
 	mutex       sync.RWMutex
+
+	// connecting is set while a dial to this node is in flight, so that two
+	// health checks never dial the same node at once. It is not guarded by
+	// mutex, because the dial happens outside it.
+	connecting atomic.Bool
 
 	// Metrics
 	publishCount   int64
@@ -63,6 +68,13 @@ type ClusterAdapter struct {
 
 	// Background task management
 	tombManager *TombManager
+
+	// dial opens a node's connection; nil means dialBroker. Tests replace it.
+	dial dialFunc
+
+	// closed is set by Close, so that a reconnect that finishes afterwards
+	// does not install a connection nothing will ever close.
+	closed atomic.Bool
 
 	mutex sync.RWMutex
 }
@@ -96,6 +108,7 @@ func NewClusterAdapter(config ClusterConfig) (*ClusterAdapter, error) {
 		failureWindow: 5 * time.Minute,
 		recoveryTime:  30 * time.Second,
 		tombManager:   NewTombManager(fmt.Sprintf("cluster-adapter-%s", config.ServiceName)),
+		dial:          dialBroker,
 	}
 
 	// Initialize nodes
@@ -141,54 +154,83 @@ func (ca *ClusterAdapter) connectToAllNodes() error {
 	return nil
 }
 
-// connectToNode establishes connection to a single node
+// errConnectInProgress is returned by connectToNode when another goroutine is
+// already dialling the node.
+var errConnectInProgress = errors.New("a connection attempt to this node is already in progress")
+
+// connectToNode (re)establishes the connection to a single node.
+//
+// It must be called without node.mutex held. The dial runs outside the lock,
+// because it can take as long as the TCP and AMQP handshakes, and
+// getHealthyNodes, and with it every Publish, reads the node under that lock;
+// only the swap of the new connection in is done under it. Taking the lock for
+// the whole call, from a caller that already held it, is what used to deadlock
+// the health check on the first closed connection.
 func (ca *ClusterAdapter) connectToNode(node *Node) error {
-	node.mutex.Lock()
-	defer node.mutex.Unlock()
-
-	// Close existing connections
-	if node.conn != nil && !node.conn.IsClosed() {
-		_ = node.conn.Close() // replacing this connection; nothing to do if it objects
+	if !node.connecting.CompareAndSwap(false, true) {
+		return errConnectInProgress
 	}
+	defer node.connecting.Store(false)
 
-	// Create new connection
-	conn, err := amqp.Dial(node.URL)
+	conn, publishCh, subscribeCh, err := ca.openNode(node)
+
+	node.mutex.Lock()
+	if err == nil && ca.closed.Load() {
+		err = errors.New("the adapter is closed")
+		_ = conn.Close() // never installed, so nothing else will close it
+	}
 	if err != nil {
 		node.state = NodeFailed
 		node.lastError = err
 		node.lastCheck = time.Now()
+		node.mutex.Unlock()
 		atomic.AddInt64(&node.errorCount, 1)
-		return fmt.Errorf("failed to connect to %s: %w", maskCredentials(node.URL), err)
+		return err
 	}
-
-	// Create channels
-	publishCh, err := conn.Channel()
-	if err != nil {
-		_ = conn.Close() // the connection is unusable without a channel
-		node.state = NodeFailed
-		node.lastError = err
-		return fmt.Errorf("failed to create publish channel for %s: %w", maskCredentials(node.URL), err)
-	}
-
-	subscribeCh, err := conn.Channel()
-	if err != nil {
-		_ = publishCh.Close()
-		_ = conn.Close()
-		node.state = NodeFailed
-		node.lastError = err
-		return fmt.Errorf("failed to create subscribe channel for %s: %w", maskCredentials(node.URL), err)
-	}
-
-	// Update node state
+	previous := node.conn
 	node.conn = conn
 	node.publishCh = publishCh
 	node.subscribeCh = subscribeCh
 	node.state = NodeHealthy
 	node.lastError = nil
 	node.lastCheck = time.Now()
+	node.mutex.Unlock()
+
+	// Closing a connection closes its channels too.
+	if previous != nil && !previous.IsClosed() {
+		_ = previous.Close() // replaced; nothing to do if it objects
+	}
 
 	logging.Info("Successfully connected to RabbitMQ node: %s", node.Name)
 	return nil
+}
+
+// openNode dials a node and opens its publish and subscribe channels. It
+// touches no node state, so it needs no lock.
+func (ca *ClusterAdapter) openNode(node *Node) (amqpConnection, amqpChannel, amqpChannel, error) {
+	dial := ca.dial
+	if dial == nil {
+		dial = dialBroker
+	}
+
+	conn, err := dial(node.URL)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to connect to %s: %w", maskCredentials(node.URL), err)
+	}
+
+	publishCh, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close() // the connection is unusable without a channel
+		return nil, nil, nil, fmt.Errorf("failed to create publish channel for %s: %w", maskCredentials(node.URL), err)
+	}
+
+	subscribeCh, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close() // closes publishCh with it
+		return nil, nil, nil, fmt.Errorf("failed to create subscribe channel for %s: %w", maskCredentials(node.URL), err)
+	}
+
+	return conn, publishCh, subscribeCh, nil
 }
 
 // getHealthyNodes returns a list of currently healthy nodes
@@ -466,7 +508,10 @@ type NodeStats struct {
 // an earlier one failed; the failures are joined into the returned error
 // rather than discarded, which is what this method used to do.
 func (ca *ClusterAdapter) Close() error {
-	// Stop background tasks using tomb manager
+	ca.closed.Store(true)
+
+	// Stop background tasks using tomb manager. This waits for any health
+	// check, and so any reconnect, in flight.
 	ca.tombManager.Shutdown()
 
 	var errs []error
@@ -512,33 +557,50 @@ func (ca *ClusterAdapter) startHealthMonitoring() {
 	}, "health-monitoring")
 }
 
-// performHealthChecks checks the health of all nodes and attempts recovery
+// performHealthChecks checks the health of all nodes and attempts recovery.
+// The nodes are checked concurrently, so one slow dial does not delay the
+// others, and the call returns when all are done, so Close (which waits for
+// the health task) also waits for any reconnect it started.
 func (ca *ClusterAdapter) performHealthChecks() {
+	var wg sync.WaitGroup
 	for _, node := range ca.nodes {
-		go ca.checkNodeHealth(node)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ca.checkNodeHealth(node)
+		}()
+	}
+	wg.Wait()
+}
+
+// checkNodeHealth checks and potentially recovers a single node. It holds
+// node.mutex only while it inspects and updates the node; a reconnect happens
+// after the lock is released (see connectToNode).
+func (ca *ClusterAdapter) checkNodeHealth(node *Node) {
+	if ca.inspectNode(node) {
+		logging.Info("Node %s connection is closed, attempting reconnection", node.Name)
+		if err := ca.connectToNode(node); err != nil && !errors.Is(err, errConnectInProgress) {
+			logging.Error("Failed to reconnect to node %s: %v", node.Name, err)
+		}
 	}
 }
 
-// checkNodeHealth checks and potentially recovers a single node
-func (ca *ClusterAdapter) checkNodeHealth(node *Node) {
+// inspectNode does the part of a health check that needs the node lock, and
+// reports whether the node's connection is gone and has to be re-established.
+func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 
 	// Skip if we checked recently
 	if time.Since(node.lastCheck) < 10*time.Second {
-		return
+		return false
 	}
 
 	node.lastCheck = time.Now()
 
 	// Test connection
 	if node.conn == nil || node.conn.IsClosed() {
-		logging.Info("Node %s connection is closed, attempting reconnection", node.Name)
-		if err := ca.connectToNode(node); err != nil {
-			logging.Error("Failed to reconnect to node %s: %v", node.Name, err)
-			return
-		}
-		return
+		return true
 	}
 
 	// Test channel health
@@ -565,4 +627,5 @@ func (ca *ClusterAdapter) checkNodeHealth(node *Node) {
 			logging.Info("Node %s upgraded from degraded to healthy", node.Name)
 		}
 	}
+	return false
 }
