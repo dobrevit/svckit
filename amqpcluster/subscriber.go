@@ -354,7 +354,7 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 		return
 	}
 	if signed, _ := delivery.Headers["signed"].(bool); signed {
-		logging.Info("✅ Verified signed event: %s (ID: %s)", event.Type, event.ID)
+		logging.Debug("Verified signed event: %s (ID: %s)", event.Type, event.ID)
 	}
 
 	// Create context for handler
@@ -369,7 +369,7 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 
 	// Call the event handler
 	if err := handler.Handle(ctx, event); err != nil {
-		logging.Error("Handler failed to process event %s: %v", event.Type, err)
+		logging.Error("Handler failed to process event %s (ID: %s): %v", event.Type, event.ID, err)
 		// Cancelled by Close: the work was not finished, so the message goes
 		// back to the queue whatever the error says.
 		if !autoAck && cs.handlers.Cancelled().Err() != nil {

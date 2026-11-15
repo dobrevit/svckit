@@ -3,11 +3,14 @@
 package eventbus_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -433,5 +436,105 @@ func TestHandlerTimeoutBoundsAHandlerCall(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the handler was not cancelled by its timeout")
+	}
+}
+
+// captureLogs sends slog's default logger, which the logging helpers write
+// through, to a buffer at level, until the test ends.
+func captureLogs(t *testing.T, level slog.Level) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return buf
+}
+
+// syncBuffer is a bytes.Buffer safe for the subscriber's goroutine to write
+// while the test reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The subscriber logged "Processing event: <type> for user: <user id>" at
+// Info for every message.
+func TestMessageLogs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	const userID = "user-7f3a-personal"
+	queue := fmt.Sprintf("svckit.it.logs.%d", time.Now().UnixNano())
+	withBroker(t, func(ch *amqp.Channel) {
+		if err := ch.ExchangeDeclare(eventbus.DefaultExchange, "topic", true, false, false, false, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Cleanup(func() {
+		withBroker(t, func(ch *amqp.Channel) {
+			_, _ = ch.QueueDelete(queue, false, false, false)
+			_, _ = ch.QueueDelete(queue+".dlq", false, false, false)
+		})
+	})
+
+	handled := make(chan struct{}, 4)
+	sub, err := eventbus.NewSubscriberWithSigning(testRabbitURL(), "eventbus-it", integrationSigning, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	if err := sub.Subscribe(queue, queue, handlerFunc(func(context.Context, *eventbus.BaseEvent) error {
+		handled <- struct{}{}
+		return nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := eventbus.NewPublisherWithSigning(testRabbitURL(), "eventbus-it", integrationSigning, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pub.Close()
+
+	send := func() {
+		t.Helper()
+		event := eventbus.NewEvent(queue, "eventbus-it", nil)
+		event.SetUserID(userID)
+		if err := pub.Publish(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-handled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the message was not handled")
+		}
+		time.Sleep(100 * time.Millisecond) // the ack and its log line follow the handler
+	}
+
+	info := captureLogs(t, slog.LevelInfo)
+	send()
+	if logged := info.String(); logged != "" {
+		t.Errorf("a published, verified and handled message logged at Info:\n%s", logged)
+	}
+
+	debug := captureLogs(t, slog.LevelDebug)
+	send()
+	logged := debug.String()
+	if logged == "" {
+		t.Fatal("nothing was logged at Debug; the test would prove nothing")
+	}
+	if strings.Contains(logged, userID) {
+		t.Errorf("a log line names the user:\n%s", logged)
 	}
 }

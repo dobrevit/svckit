@@ -133,7 +133,7 @@ func (cp *ClusterPublisher) publishSigned(ctx context.Context, event *eventbus.B
 		return fmt.Errorf("failed to publish signed event to cluster: %w", err)
 	}
 
-	logging.Info("Published signed event %s (ID: %s) via cluster", event.Type, event.ID)
+	logging.Debug("Published signed event %s (ID: %s) via cluster", event.Type, event.ID)
 	return nil
 }
 
@@ -168,7 +168,7 @@ func (cp *ClusterPublisher) publishUnsigned(ctx context.Context, event *eventbus
 		return fmt.Errorf("failed to publish unsigned event to cluster: %w", err)
 	}
 
-	logging.Info("Published unsigned event %s (ID: %s) via cluster", event.Type, event.ID)
+	logging.Debug("Published unsigned event %s (ID: %s) via cluster", event.Type, event.ID)
 	return nil
 }
 

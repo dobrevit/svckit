@@ -175,6 +175,16 @@ releases.
   its context cancelled after the close timeout instead of running on.
   Timeouts are otherwise unchanged. The subscriber constructors take
   `...SubscriberOption` (source-compatible for callers).
+- **Per-message logs move to Debug and carry no user id.** *Default change,
+  log output only.* `eventbus.Subscriber` logged `Processing event: <type>
+  for user: <user id>` at Info for every message, and both packages logged
+  each publish, verification and successful handling at Info: a user id is
+  personal data in most deployments, and a line per message at Info is noise
+  at any volume. Those lines are now Debug and name the event type and id,
+  never the user; failure lines keep the type, the id and the error, never
+  the body. Accepting an unsigned message stays a Warn where signatures are
+  otherwise verified (`AllowUnsigned`), and is Debug on a subscriber that
+  verifies nothing. Metrics are unchanged.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in

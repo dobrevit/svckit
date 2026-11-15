@@ -73,6 +73,13 @@ func decodeDelivery(d amqp.Delivery, verifier *EventVerifier, signingRequired, a
 	if err != nil {
 		return nil, &rejection{reasonParseError, "unknown", fmt.Errorf("parse event: %w", err)}
 	}
-	logging.Warn("⚠️  Processing unsigned event: %s (ID: %s)", event.Type, event.ID)
+	// Accepting an unsigned message is worth a Warn only where signatures
+	// are otherwise checked (AllowUnsigned); a subscriber that verifies
+	// nothing would say it about every message.
+	if verifier != nil || signingRequired {
+		logging.Warn("⚠️  Processing unsigned event: %s (ID: %s)", event.Type, event.ID)
+	} else {
+		logging.Debug("Processing unsigned event: %s (ID: %s)", event.Type, event.ID)
+	}
 	return event, nil
 }

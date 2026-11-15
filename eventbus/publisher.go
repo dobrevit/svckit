@@ -178,7 +178,7 @@ func (p *Publisher) Publish(ctx context.Context, event *BaseEvent) error {
 	if err := p.send(ctx, event, body, headers); err != nil {
 		return err
 	}
-	logging.Warn("⚠️  Published unsigned event: %s (ID: %s)", event.Type, event.ID)
+	logging.Debug("Published unsigned event: %s (ID: %s)", event.Type, event.ID)
 	return nil
 }
 
@@ -216,7 +216,7 @@ func (p *Publisher) PublishSigned(ctx context.Context, event *BaseEvent) error {
 	if err := p.send(ctx, event, body, headers); err != nil {
 		return err
 	}
-	logging.Info("✅ Published signed event: %s (ID: %s, Signature: %.8s...)",
+	logging.Debug("Published signed event: %s (ID: %s, Signature: %.8s...)",
 		event.Type, event.ID, signedEvent.Signature)
 	return nil
 }
@@ -612,14 +612,15 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 					return
 				}
 				if signed, _ := d.Headers["signed"].(bool); signed {
-					logging.Info("✅ Verified signed event: %s (ID: %s)", event.Type, event.ID)
+					logging.Debug("Verified signed event: %s (ID: %s)", event.Type, event.ID)
 				}
 
 				// Record event received
 				RecordEventReceived(event.Type, s.serviceName, queueName)
 
-				// Log the event for debugging
-				logging.Info("Processing event: %s for user: %s", event.Type, event.UserID)
+				// Per-message lines are Debug, and carry no user id: that is
+				// personal data in most deployments.
+				logging.Debug("Processing event: %s (ID: %s)", event.Type, event.ID)
 
 				// Start timing the processing
 				processingStart := time.Now()
@@ -629,7 +630,7 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 				ctx = WithAttempt(ctx, retry.Attempt(d))
 
 				if err := handler.Handle(ctx, event); err != nil {
-					logging.Error("Error handling event %s: %v", event.Type, err)
+					logging.Error("Error handling event %s (ID: %s): %v", event.Type, event.ID, err)
 
 					// Record processing duration even for failures
 					EventProcessingDuration.WithLabelValues(event.Type, s.serviceName, queueName).Observe(time.Since(processingStart).Seconds())
@@ -668,7 +669,7 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 				RecordEventAcknowledged(event.Type, s.serviceName, queueName)
 				RecordEventProcessed(event.Type, s.serviceName, queueName, "success")
 				ack(d)
-				logging.Info("Successfully processed event: %s", event.Type)
+				logging.Debug("Successfully processed event: %s (ID: %s)", event.Type, event.ID)
 			}()
 		}
 	}()
