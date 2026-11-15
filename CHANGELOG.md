@@ -124,6 +124,16 @@ releases.
   every existing consumer from starting against its own queue. A new queue
   should choose its TTL, or leave it to a broker policy, which can change
   without a redeclare.
+- **Handlers mark errors retryable or permanent.** *Opt-in; unmarked errors
+  behave as before.* Whether a failed message was requeued was decided by
+  looking for words such as "connection", "timeout" or "invalid" in the
+  error's text, with different lists in `eventbus` and `amqpcluster` (and the
+  latter case-sensitive, despite its comment); a handler could not say what
+  it meant. The new `eventbus.Retryable(err)` and `eventbus.Permanent(err)`
+  mark an error, through any `%w` wrapping, and `eventbus.IsRetryable(err)`
+  reads the mark. Both subscribers obey a mark first.
+  **Deprecated:** the word matching, used only for unmarked errors, will be
+  removed in a later release; mark handler errors instead.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in

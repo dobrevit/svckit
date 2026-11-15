@@ -549,8 +549,21 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 	return nil
 }
 
-// isRetryableError determines if an error is retryable
+// isRetryableError decides whether a handler's error requeues the message:
+// what the handler said with Retryable or Permanent, or, for an error with
+// neither mark, guessedRetryable.
 func isRetryableError(err error) bool {
+	if retry, decided := IsRetryable(err); decided {
+		return retry
+	}
+	return guessedRetryable(err)
+}
+
+// guessedRetryable is the fallback for an unmarked error: it looks for words
+// in the error's text, so a message that happens to mention "connection" is
+// retried. Deprecated: mark errors with Retryable or Permanent instead; this
+// fallback will be removed in a later release.
+func guessedRetryable(err error) bool {
 	errStr := strings.ToLower(err.Error())
 
 	// Database connection errors are retryable

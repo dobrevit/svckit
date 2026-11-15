@@ -308,12 +308,26 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 	}
 }
 
-// isRetryableError determines if an error is worth retrying
+// isRetryableError decides whether a handler's error requeues the message:
+// what the handler said with eventbus.Retryable or eventbus.Permanent, or,
+// for an error with neither mark, guessedRetryable.
 func (cs *ClusterSubscriber) isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if retry, decided := eventbus.IsRetryable(err); decided {
+		return retry
+	}
+	return guessedRetryable(err)
+}
 
+// guessedRetryable is the fallback for an unmarked error: it looks for words
+// in the error's text, so a message that happens to mention "connection" is
+// retried. Its list differs from eventbus's, and the match is
+// case-sensitive. Deprecated: mark errors with eventbus.Retryable or
+// eventbus.Permanent instead; this fallback will be removed in a later
+// release.
+func guessedRetryable(err error) bool {
 	errStr := err.Error()
 
 	// Retryable: temporary network, connection, timeout errors
@@ -344,7 +358,7 @@ func (cs *ClusterSubscriber) isRetryableError(err error) bool {
 	return false
 }
 
-// contains checks if a string contains a substring (case-insensitive)
+// contains checks if a string contains a substring. It is case-sensitive.
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) &&
 		(s == substr ||
