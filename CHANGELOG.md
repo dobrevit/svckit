@@ -8,6 +8,30 @@ releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.26 is now the minimum** for every module (`go 1.26.0`; `ginx` needs
+  `1.26.10`, which `gin-contrib/sse` requires). `prometheus/client_golang`
+  1.25, `go-redis` 9.23 and current `golang.org/x/*` releases require it. CI
+  now tests on Go 1.26 and 1.27. This is the only consumer-visible change in
+  this entry; no svckit API or behaviour changed.
+- Dependencies upgraded across all modules: `pgx` 5.13.0, `amqp091-go` 1.16.0,
+  `go-redis` 9.23.0, `prometheus/client_golang` 1.25.0, `testify` 1.12.1,
+  `chi` 5.5.0, `testcontainers-go` 0.45.0, and current `golang.org/x/*`.
+
+### Security
+
+- `amqp091-go` 1.13.0 → 1.16.0 fixes GO-2026-6700. It also fixes the 1.13.0
+  regression that zeroed caller-owned SASL credentials after the handshake,
+  which broke reusing an `amqp.Config` across reconnects.
+- `pgx` 5.10.0 → 5.13.0 fixes GHSA-j38q-h3ph-jjpq (SQL injection in
+  simple-protocol batches), GHSA-95fj-3fxw-g62g (`require_auth` /
+  `channel_binding` bypass) and GHSA-w9rp-vfrh-q8vv (`Rows.Values` panic).
+- `golang.org/x/text` fixes GO-2026-6629; in `ginx`, `golang.org/x/net` fixes
+  GO-2026-6603, -6611, -6612 and -6617; in `testkit`, `klauspost/compress`
+  (GO-2026-6865), `golang.org/x/crypto` (GO-2026-6354, -6355) and
+  `moby/go-archive` (GO-2026-6253). `govulncheck` is clean on all four modules.
+
 ## [0.1.3] - 2026-08-12
 
 ### Added

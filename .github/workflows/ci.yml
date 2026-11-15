@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 env:
-  # The dependency set (pgx, prometheus, golang.org/x/*) requires Go 1.25.
-  GO_VERSION: "1.25"
+  # The dependency set (prometheus, go-redis, golang.org/x/*) requires Go 1.26;
+  # ginx additionally needs 1.26.10+ (gin-contrib/sse), which "1.26" resolves to.
+  GO_VERSION: "1.26"
 
 jobs:
   build:
@@ -19,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25", "1.26"]
+        go: ["1.26", "1.27"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

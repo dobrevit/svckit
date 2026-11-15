@@ -47,6 +47,29 @@ updates:
         update-types:
           - patch
 
+  # The router adapters are separate modules too; without entries here they
+  # only ever got security updates.
+  - package-ecosystem: gomod
+    directories:
+      - "/chix"
+      - "/ginx"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - adapters
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      adapters-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
