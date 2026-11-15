@@ -3,7 +3,7 @@ module github.com/dobrevit/svckit/testkit
 go 1.26.0
 
 require (
-	github.com/dobrevit/svckit v0.1.3
+	github.com/dobrevit/svckit v0.1.4
 	github.com/lib/pq v1.12.3
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0

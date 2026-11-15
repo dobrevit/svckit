@@ -8,6 +8,12 @@ releases.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-15
+
+A dependency and security release: no svckit API or behaviour changed.
+`testkit`, `chix` and `ginx` are released as v0.1.4 alongside, each requiring
+svckit v0.1.4.
+
 ### Changed
 
 - **Go 1.26 is now the minimum** for every module (`go 1.26.0`; `ginx` needs
@@ -222,7 +228,8 @@ It remains the record of what the toolkit contains.
   without this module depending on OpenTelemetry.
 - The main module depends on no web framework and no ORM.
 
-[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/dobrevit/svckit/releases/tag/v0.1.4
 [0.1.3]: https://github.com/dobrevit/svckit/releases/tag/v0.1.3
 [0.1.2]: https://github.com/dobrevit/svckit/releases/tag/v0.1.2
 [0.1.1]: https://github.com/dobrevit/svckit/releases/tag/v0.1.1
