@@ -31,6 +31,7 @@ jobs:
             testkit/go.sum
             chix/go.sum
             ginx/go.sum
+            vaultx/go.sum
 
       - name: Build
         run: go build ./...
@@ -40,7 +41,7 @@ jobs:
 
       - name: Build and vet the submodules
         run: |
-          for m in testkit chix ginx; do
+          for m in testkit chix ginx vaultx; do
             echo "== $m =="
             (cd "$m" && go build ./... && go vet ./...)
           done
@@ -50,7 +51,7 @@ jobs:
       - name: Vet integration tier
         run: |
           go vet -tags integration ./...
-          for m in testkit chix ginx; do (cd "$m" && go vet -tags integration ./...); done
+          for m in testkit chix ginx vaultx; do (cd "$m" && go vet -tags integration ./...); done
 
   unit:
     name: Unit tests
@@ -65,13 +66,14 @@ jobs:
             testkit/go.sum
             chix/go.sum
             ginx/go.sum
+            vaultx/go.sum
 
       - name: Test
         run: go test -race -short -count=1 -coverprofile=coverage.txt ./...
 
       - name: Test the submodules
         run: |
-          for m in testkit chix ginx; do
+          for m in testkit chix ginx vaultx; do
             echo "== $m =="
             (cd "$m" && go test -race -short -count=1 ./...)
           done
@@ -94,6 +96,7 @@ jobs:
             testkit/go.sum
             chix/go.sum
             ginx/go.sum
+            vaultx/go.sum
 
       - name: Start dependencies
         run: docker compose up -d --wait
@@ -107,7 +110,7 @@ jobs:
         env:
           INTEGRATION_TESTS: "true"
         run: |
-          for m in testkit chix ginx; do
+          for m in testkit chix ginx vaultx; do
             echo "== $m =="
             (cd "$m" && go test -race -tags integration -p 1 -count=1 ./...)
           done
@@ -143,5 +146,5 @@ jobs:
       - name: Verify tidy
         run: |
           go mod tidy
-          for m in testkit chix ginx; do (cd "$m" && go mod tidy); done
+          for m in testkit chix ginx vaultx; do (cd "$m" && go mod tidy); done
           git diff --exit-code -- '*go.mod' '*go.sum' 

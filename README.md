@@ -46,6 +46,7 @@ Optional modules — take only what you use:
 go get github.com/dobrevit/svckit/testkit  # test harness (Docker, testcontainers)
 go get github.com/dobrevit/svckit/chix     # chi router adapter
 go get github.com/dobrevit/svckit/ginx     # Gin framework adapter
+go get github.com/dobrevit/svckit/vaultx   # Vault Transit key wrapping
 ```
 
 ### Using it from chi
@@ -104,6 +105,7 @@ router.Use(ginx.LoggingMiddleware())
 | [`testkit`](testkit) | Test harness: suites, mocks, assertions and container fixtures *(separate module)* |
 | [`chix`](chix) | chi router adapter — route-template labelling *(separate module)* |
 | [`ginx`](ginx) | Gin adapter — middleware, response helpers, pagination *(separate module)* |
+| [`vaultx`](vaultx) | Vault Transit data-key wrapping for sealed events, AppRole login and token renewal *(separate module)* |
 
 ## Quick start
 

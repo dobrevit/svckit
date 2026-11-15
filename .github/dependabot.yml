@@ -47,12 +47,13 @@ updates:
         update-types:
           - patch
 
-  # The router adapters are separate modules too; without entries here they
+  # The router adapters and vaultx are separate modules too; without entries here they
   # only ever got security updates.
   - package-ecosystem: gomod
     directories:
       - "/chix"
       - "/ginx"
+      - "/vaultx"
     schedule:
       interval: weekly
       day: monday

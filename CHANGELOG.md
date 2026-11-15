@@ -79,6 +79,19 @@ releases.
   `GetVaultAddress()`, the root token `containers.VaultRootToken`,
   `EnableTransit`, `EnablePKI` (a root and an intermediate ECDSA CA, the
   intermediate signed by the root) and `VaultRequest` for anything else.
+- **`vaultx`** *(new module)* **wraps per-message keys with Vault Transit.**
+  `vaultx.TransitWrapper` is a `seal.KeyWrapper` whose data keys come from
+  `transit/datakey/plaintext/<key>` and are unwrapped by
+  `transit/decrypt/<key>`, so the key-encryption key never leaves Vault and a
+  publisher's policy can allow the first while a consumer's allows only the
+  second (a refusal is `vaultx.ErrForbidden`); the envelope records the key
+  version from the `vault:vN:` prefix, so old envelopes open after a rotation
+  until `min_decryption_version` is raised. `vaultx.Client` logs in with a
+  token or AppRole, renews its token at two thirds of its lifetime and logs
+  in again once it reaches its maximum TTL; `vaultx.NewHealthChecker` reports
+  Vault's health for readiness. A module of its own, so the core never
+  depends on Vault; plain `net/http`, like `secrets.VaultStore`, rather than
+  the official client and its dependencies.
 
 ### Fixed
 
