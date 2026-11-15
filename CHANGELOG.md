@@ -8,6 +8,21 @@ releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rediscluster.NewClusterAdapter` applies the config defaults.** Only
+  `LoadConfigFromEnv` did, so a `ClusterConfig` literal that left settings
+  out ran with zeros: with no `HealthCheckTimeout` the adapter could not
+  connect (the ping's context had already expired), with no
+  `HealthCheckInterval` health monitoring panicked and silently never ran,
+  with no `RetryBackoffBase` the first retry panicked in the caller's
+  goroutine, and with no `CircuitBreakerThreshold` a node was degraded by its
+  first error. The constructor now fills in the defaults on its own copy, a
+  non-positive interval, timeout, backoff or threshold is replaced as well,
+  and the backoff jitter no longer panics on a tiny base. The integration
+  test that should have caught this skipped on a failed constructor; it now
+  skips only when Redis itself does not answer. *Fix; no API change.*
+
 ## [0.1.5] - 2026-11-15
 
 The messaging, database and shutdown fixes and additions of backlog items

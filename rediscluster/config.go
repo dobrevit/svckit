@@ -215,7 +215,11 @@ func (c *ClusterConfig) loadReadBalancingSettings() {
 	c.LoadBalanceStrategy = "round_robin"
 }
 
-// setDefaults sets default values for unset configuration
+// setDefaults sets default values for unset configuration. NewClusterAdapter
+// applies it as well as LoadConfigFromEnv. The settings that must be positive
+// are replaced when they are not: a non-positive interval panics
+// time.NewTicker, a non-positive timeout expires before it is used, and a
+// non-positive threshold degrades a node on its first error.
 func (c *ClusterConfig) setDefaults() {
 	if c.MaxPoolSize == 0 {
 		c.MaxPoolSize = 100
@@ -229,22 +233,22 @@ func (c *ClusterConfig) setDefaults() {
 	if c.ConnMaxLifetime == 0 {
 		c.ConnMaxLifetime = 5 * time.Minute
 	}
-	if c.HealthCheckInterval == 0 {
+	if c.HealthCheckInterval <= 0 {
 		c.HealthCheckInterval = 30 * time.Second
 	}
-	if c.HealthCheckTimeout == 0 {
+	if c.HealthCheckTimeout <= 0 {
 		c.HealthCheckTimeout = 5 * time.Second
 	}
 	if c.MaxRetries == 0 {
 		c.MaxRetries = 3
 	}
-	if c.RetryBackoffBase == 0 {
+	if c.RetryBackoffBase <= 0 {
 		c.RetryBackoffBase = 1 * time.Second
 	}
-	if c.RetryBackoffMax == 0 {
+	if c.RetryBackoffMax <= 0 {
 		c.RetryBackoffMax = 30 * time.Second
 	}
-	if c.CircuitBreakerThreshold == 0 {
+	if c.CircuitBreakerThreshold <= 0 {
 		c.CircuitBreakerThreshold = 5
 	}
 	if c.CircuitBreakerTimeout == 0 {

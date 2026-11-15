@@ -108,9 +108,15 @@ func NewClusterAdapter(config *ClusterConfig) (*ClusterAdapter, error) {
 	// Initialize global logger
 	logging.InitializeGlobalLogger(config.ServiceName)
 
-	// Validate configuration
+	// Fill in what the caller left out, on a copy. Without this, only a
+	// config from LoadConfigFromEnv had defaults, and a literal that left
+	// fields out ran with zeros: an expired ping timeout, a ticker that
+	// panics, a retry that panics, a node degraded by its first error.
+	cfg := *config
+	cfg.setDefaults()
+
 	adapter := &ClusterAdapter{
-		config:        *config,
+		config:        cfg,
 		nodes:         make([]*RedisNode, len(config.NodeURLs)),
 		failureWindow: 5 * time.Minute,
 		recoveryTime:  30 * time.Second,
@@ -401,9 +407,15 @@ func (ca *ClusterAdapter) calculateBackoff(attempt int) time.Duration {
 	if backoff > ca.config.RetryBackoffMax {
 		backoff = ca.config.RetryBackoffMax
 	}
-	// Add jitter
-	jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
-	return backoff + jitter
+	// Add jitter. rand.Int63n panics for anything but a positive bound, which
+	// a backoff under four nanoseconds would give it.
+	if spread := int64(backoff / 4); spread > 0 {
+		backoff += time.Duration(rand.Int63n(spread))
+	}
+	if backoff < 0 {
+		return 0
+	}
+	return backoff
 }
 
 // GetClusterHealth returns health information for all nodes
