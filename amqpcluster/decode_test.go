@@ -78,11 +78,11 @@ func signedDelivery(t *testing.T, tamper bool) amqp.Delivery {
 // The same table as eventbus's TestDecodeDelivery: the two subscribers must
 // accept and reject the same messages.
 func TestDecodeDelivery(t *testing.T) {
-	verifier := eventbus.NewEventVerifier(testSigning)
+	verifier := eventbus.NewHMAC(testSigning)
 	cases := []struct {
 		name            string
 		delivery        amqp.Delivery
-		verifier        *eventbus.EventVerifier
+		verifier        eventbus.Verifier
 		signingRequired bool
 		allowUnsigned   bool
 		wantReason      string // "" means accepted
@@ -102,7 +102,7 @@ func TestDecodeDelivery(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			event, err := decodeDelivery(tc.delivery, tc.verifier, tc.signingRequired, tc.allowUnsigned)
+			event, err := decodeDelivery(context.Background(), tc.delivery, tc.verifier, tc.signingRequired, tc.allowUnsigned)
 			if tc.wantReason == "" {
 				if err != nil {
 					t.Fatalf("rejected: %v", err)

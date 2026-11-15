@@ -28,7 +28,7 @@ type Publisher struct {
 	conn           *amqp.Connection
 	channel        *amqp.Channel
 	serviceName    string
-	signer         *EventSigner
+	signer         Signer
 	requireSigning bool
 	deliveryMode   uint8
 
@@ -70,6 +70,16 @@ type PublisherOption func(*Publisher)
 // worthless after a restart, such as cache invalidations.
 func WithTransient() PublisherOption {
 	return func(p *Publisher) { p.deliveryMode = amqp.Transient }
+}
+
+// WithSigner signs every published event with signer instead of the HMAC
+// scheme the signing config would give, such as a certificate signer.
+func WithSigner(signer Signer) PublisherOption {
+	return func(p *Publisher) {
+		if signer != nil {
+			p.signer = signer
+		}
+	}
 }
 
 // WithConfirms makes Publish return only once the broker has confirmed the
@@ -123,18 +133,15 @@ func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *Sig
 		return nil, err
 	}
 
-	var signer *EventSigner
-	if signingConfig != nil || requireSigning {
-		signer = NewEventSigner(signingConfig)
-	}
-
 	publisher := &Publisher{
 		conn:           conn,
 		channel:        ch,
 		serviceName:    serviceName,
-		signer:         signer,
 		requireSigning: requireSigning,
 		deliveryMode:   amqp.Persistent,
+	}
+	if signingConfig != nil || requireSigning {
+		publisher.signer = NewHMAC(signingConfig)
 	}
 	for _, opt := range opts {
 		opt(publisher)
@@ -189,7 +196,7 @@ func (p *Publisher) PublishSigned(ctx context.Context, event *BaseEvent) error {
 	}
 
 	// Sign the event
-	signedEvent, err := p.signer.Sign(event)
+	signedEvent, err := p.signer.Sign(ctx, event)
 	if err != nil {
 		RecordEventPublished(event.Type, p.serviceName, "error")
 		return err
@@ -294,7 +301,7 @@ type Subscriber struct {
 	conn           *amqp.Connection
 	channel        *amqp.Channel
 	serviceName    string
-	verifier       *EventVerifier
+	verifier       Verifier
 	requireSigning bool
 
 	// retrier republishes failed messages for a RetryPolicy, on a channel of
@@ -328,6 +335,18 @@ func WithCloseTimeout(d time.Duration) SubscriberOption {
 	return func(s *Subscriber) { s.closeTimeout = d }
 }
 
+// WithVerifier verifies signed events with verifier instead of the HMAC
+// scheme the signing config would give, such as a certificate verifier. A
+// subscriber with a verifier rejects unsigned messages (see
+// SubscribeOptions.AllowUnsigned).
+func WithVerifier(verifier Verifier) SubscriberOption {
+	return func(s *Subscriber) {
+		if verifier != nil {
+			s.verifier = verifier
+		}
+	}
+}
+
 // RetryPolicy retries a message whose handler failed with a retryable error
 // after a delay, a bounded number of times, and then dead-letters it. See
 // SubscribeOptions.Retry.
@@ -355,19 +374,16 @@ func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *Si
 		return nil, err
 	}
 
-	var verifier *EventVerifier
-	if signingConfig != nil || requireSigning {
-		verifier = NewEventVerifier(signingConfig)
-	}
-
 	subscriber := &Subscriber{
 		conn:           conn,
 		channel:        ch,
 		serviceName:    serviceName,
-		verifier:       verifier,
 		requireSigning: requireSigning,
 		handlers:       inflight.New(),
 		closeTimeout:   DefaultCloseTimeout,
+	}
+	if signingConfig != nil || requireSigning {
+		subscriber.verifier = NewHMAC(signingConfig)
 	}
 	for _, opt := range opts {
 		opt(subscriber)
@@ -596,7 +612,7 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 					}
 				}()
 
-				event, err := decodeDelivery(d, s.verifier, s.requireSigning, opts.AllowUnsigned)
+				event, err := decodeDelivery(handlerParent(opts.Context), d, s.verifier, s.requireSigning, opts.AllowUnsigned)
 				if err != nil {
 					var r *rejection
 					if !errors.As(err, &r) {

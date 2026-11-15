@@ -16,43 +16,55 @@ import (
 type ClusterPublisher struct {
 	cluster     *ClusterAdapter
 	serviceName string
-	signer      *eventbus.EventSigner
+	signer      eventbus.Signer
 	exchange    string
 }
 
+// PublisherOption adjusts a ClusterPublisher when it is created.
+type PublisherOption func(*ClusterPublisher)
+
+// WithSigner signs every published event with signer instead of the HMAC
+// scheme the signing config would give, such as a certificate signer.
+func WithSigner(signer eventbus.Signer) PublisherOption {
+	return func(cp *ClusterPublisher) {
+		if signer != nil {
+			cp.signer = signer
+		}
+	}
+}
+
 // NewClusterPublisher creates a new cluster-aware event publisher
-func NewClusterPublisher(nodes []string, serviceName string, signingConfig *eventbus.SignatureConfig) (*ClusterPublisher, error) {
+func NewClusterPublisher(nodes []string, serviceName string, signingConfig *eventbus.SignatureConfig, opts ...PublisherOption) (*ClusterPublisher, error) {
 	return NewClusterPublisherWithConfig(ClusterConfig{
 		Nodes:               nodes,
 		ServiceName:         serviceName,
 		HealthCheckInterval: 30 * time.Second,
 		RetryAttempts:       3,
 		LoadBalanceStrategy: "round_robin",
-	}, signingConfig)
+	}, signingConfig, opts...)
 }
 
 // NewClusterPublisherWithConfig creates a publisher over an adapter built
 // from config, for the settings NewClusterPublisher fixes; chiefly
 // PublisherConfirms, which makes Publish return only once the broker has
 // confirmed the message.
-func NewClusterPublisherWithConfig(config ClusterConfig, signingConfig *eventbus.SignatureConfig) (*ClusterPublisher, error) {
+func NewClusterPublisherWithConfig(config ClusterConfig, signingConfig *eventbus.SignatureConfig, opts ...PublisherOption) (*ClusterPublisher, error) {
 	serviceName := config.ServiceName
 	cluster, err := NewClusterAdapter(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cluster adapter: %w", err)
 	}
 
-	// Initialize signer if provided
-	var signer *eventbus.EventSigner
-	if signingConfig != nil {
-		signer = eventbus.NewEventSigner(signingConfig)
-	}
-
 	publisher := &ClusterPublisher{
 		cluster:     cluster,
 		serviceName: serviceName,
-		signer:      signer,
 		exchange:    eventbus.DefaultExchange,
+	}
+	if signingConfig != nil {
+		publisher.signer = eventbus.NewHMAC(signingConfig)
+	}
+	for _, opt := range opts {
+		opt(publisher)
 	}
 
 	// Setup exchange on all nodes
@@ -98,7 +110,7 @@ func (cp *ClusterPublisher) Publish(ctx context.Context, event *eventbus.BaseEve
 // publishSigned publishes a signed event
 func (cp *ClusterPublisher) publishSigned(ctx context.Context, event *eventbus.BaseEvent) error {
 	// Create signed event
-	signedEvent, err := cp.signer.Sign(event)
+	signedEvent, err := cp.signer.Sign(ctx, event)
 	if err != nil {
 		return fmt.Errorf("failed to sign event: %w", err)
 	}

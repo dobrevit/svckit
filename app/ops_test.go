@@ -89,3 +89,28 @@ func TestNewTakesTheOpsListenerFromTheEnvironment(t *testing.T) {
 		t.Errorf("OpsAddr = %q, want the option over OPS_ADDR", a.OpsAddr)
 	}
 }
+
+// A service with no key configured used to start on a key published in
+// svckit's source.
+func TestWithStrictSigningRefusesToStartWithoutAKey(t *testing.T) {
+	t.Setenv("OPS_ADDR", "")
+	t.Setenv("EVENT_SIGNING_KEY_REQUIRED", "")
+	t.Setenv("EVENT_SIGNING_KEY", "")
+
+	if _, err := app.New("test-service", app.WithStrictSigning()); err == nil {
+		t.Error("New with WithStrictSigning and no key succeeded")
+	}
+
+	a, err := app.New("test-service")
+	if err != nil {
+		t.Fatalf("New without the option, and no key: %v (it should fall back as before)", err)
+	}
+	a.Close()
+
+	t.Setenv("EVENT_SIGNING_KEY", "a-real-key-0123456789abcdef")
+	a, err = app.New("test-service", app.WithStrictSigning())
+	if err != nil {
+		t.Fatalf("New with WithStrictSigning and a key: %v", err)
+	}
+	a.Close()
+}

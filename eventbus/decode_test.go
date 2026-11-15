@@ -1,6 +1,7 @@
 package eventbus
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -45,11 +46,11 @@ func signedDelivery(t *testing.T, config *SignatureConfig, tamper bool) amqp.Del
 // message harder to accept. These cases are the parse path of
 // Subscriber.Subscribe; amqpcluster's decode_test.go runs the same table.
 func TestDecodeDelivery(t *testing.T) {
-	verifier := NewEventVerifier(testSigning)
+	verifier := NewHMAC(testSigning)
 	cases := []struct {
 		name            string
 		delivery        amqp.Delivery
-		verifier        *EventVerifier
+		verifier        Verifier
 		signingRequired bool
 		allowUnsigned   bool
 		wantReason      string // "" means accepted
@@ -69,7 +70,7 @@ func TestDecodeDelivery(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			event, err := decodeDelivery(tc.delivery, tc.verifier, tc.signingRequired, tc.allowUnsigned)
+			event, err := decodeDelivery(context.Background(), tc.delivery, tc.verifier, tc.signingRequired, tc.allowUnsigned)
 			if tc.wantReason == "" {
 				if err != nil {
 					t.Fatalf("rejected: %v", err)

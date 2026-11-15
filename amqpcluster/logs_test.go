@@ -35,7 +35,7 @@ const (
 func oneMessage(t *testing.T, logs *bytes.Buffer, handlerErr error) (logged string, event *eventbus.BaseEvent) {
 	t.Helper()
 	ca, _, _ := clusterOf(t, 1, "rabbit-1")
-	pub := &ClusterPublisher{cluster: ca, serviceName: "orders", signer: eventbus.NewEventSigner(testSigning), exchange: "events"}
+	pub := &ClusterPublisher{cluster: ca, serviceName: "orders", signer: eventbus.NewHMAC(testSigning), exchange: "events"}
 	sub := subscriberOn(ca, "billing", testSigning, false)
 
 	event = eventbus.NewEvent("order.created", "orders", map[string]any{"note": bodyMarker})

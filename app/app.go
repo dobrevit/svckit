@@ -56,6 +56,7 @@ type options struct {
 	auditOptional bool
 	extraChecks   []middleware.HealthChecker
 	opsAddr       string
+	strictSigning bool
 }
 
 // Option configures which infrastructure New wires up.
@@ -113,6 +114,15 @@ func WithOptionalAudit() Option {
 // readiness; only the runtime's own hard dependencies do.
 func WithHealthCheck(check middleware.HealthChecker) Option {
 	return func(o *options) { o.extraChecks = append(o.extraChecks, check) }
+}
+
+// WithStrictSigning makes New fail when no event signing key is configured,
+// or when the key is eventbus.DevelopmentSigningKey, instead of falling back
+// to that key with a warning: a service running on a key published in
+// svckit's source signs nothing anyone could not forge.
+// EVENT_SIGNING_KEY_REQUIRED=true has the same effect without the option.
+func WithStrictSigning() Option {
+	return func(o *options) { o.strictSigning = true }
 }
 
 // WithOpsListener serves /metrics and, with LOG_LEVEL=debug, the pprof
@@ -175,7 +185,11 @@ func New(name string, opts ...Option) (*App, error) {
 		return nil, err
 	}
 
-	signing, err := eventbus.LoadSignatureConfig(nil)
+	loadSigning := eventbus.LoadSignatureConfig
+	if o.strictSigning {
+		loadSigning = eventbus.LoadSignatureConfigStrict
+	}
+	signing, err := loadSigning(nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load event signing key: %w", err)
 	}

@@ -66,6 +66,7 @@ type fakeChannel struct {
 	declared  []string
 	queueArgs map[string]amqp.Table
 	onPublish func(routingKey string)
+	published []amqp.Publishing
 	cancelled []string // consumer tags
 	closeOnce sync.Once
 }
@@ -88,14 +89,26 @@ func (ch *fakeChannel) Close() error {
 
 // Publish fails the way amqp091 does on a channel the broker has closed, and
 // succeeds otherwise, telling onPublish.
-func (ch *fakeChannel) Publish(_, key string, _, _ bool, _ amqp.Publishing) error {
+func (ch *fakeChannel) Publish(_, key string, _, _ bool, msg amqp.Publishing) error {
 	if ch.IsClosed() {
 		return amqp.ErrClosed
 	}
+	ch.mu.Lock()
+	ch.published = append(ch.published, msg)
+	ch.mu.Unlock()
 	if ch.onPublish != nil {
 		ch.onPublish(key)
 	}
 	return nil
+}
+
+func (ch *fakeChannel) lastPublished() (amqp.Publishing, bool) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if len(ch.published) == 0 {
+		return amqp.Publishing{}, false
+	}
+	return ch.published[len(ch.published)-1], true
 }
 
 func (ch *fakeChannel) record(what string) error {

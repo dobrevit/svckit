@@ -8,6 +8,32 @@ releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Signing is an interface; HMAC is one implementation, with a configurable
+  age limit and a strict key mode.** *Opt-in, with one edge case below.*
+  `eventbus.Signer` (`Sign(ctx, event)`) and `eventbus.Verifier`
+  (`Verify(ctx, signed)`) let a publisher or subscriber use another scheme;
+  `eventbus.NewHMAC(config)` implements both, and `eventbus.WithSigner` /
+  `WithVerifier` and `amqpcluster.WithSigner` / `WithVerifier` (new
+  `amqpcluster.PublisherOption`) pass one in, with the `*SignatureConfig`
+  constructors unchanged. `SignedEvent` gains `Scheme` (`hmac-sha256`; empty,
+  as in every older message, means the same), and a verifier refuses a scheme
+  it does not implement. `EVENT_SIGNATURE_MAX_AGE` sets the signature window
+  (default 30 minutes), and a verifier's window is now what limits a
+  message's age, measured from `SignedAt`, so a consumer can accept messages
+  older than the publisher's window, as a long retry schedule needs.
+  `eventbus.LoadSignatureConfigStrict`, `EVENT_SIGNING_KEY_REQUIRED=true` (for
+  it, `LoadSignatureConfig` and `amqpcluster.LoadConfigFromEnv`) and
+  `app.WithStrictSigning()` refuse to start without a key, or with
+  `eventbus.DevelopmentSigningKey`, the fallback published in this
+  repository. The lenient loaders and the 30-minute default remain.
+  **Edge case:** a consumer whose window is shorter than the window a
+  producer signed with now rejects messages older than its own window, where
+  it used to follow the producer's `ExpiresAt`. With the default on both
+  sides nothing changes; otherwise set `EVENT_SIGNATURE_MAX_AGE` on the
+  consumer.
+
 ### Fixed
 
 - **`rediscluster.NewClusterAdapter` applies the config defaults.** Only

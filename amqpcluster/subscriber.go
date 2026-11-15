@@ -18,7 +18,7 @@ import (
 type ClusterSubscriber struct {
 	cluster     *ClusterAdapter
 	serviceName string
-	verifier    *eventbus.EventVerifier
+	verifier    eventbus.Verifier
 	exchange    string
 
 	// signingRequired is Config.SigningRequired: unsigned messages are
@@ -47,6 +47,18 @@ type SubscriberOption func(*ClusterSubscriber)
 // cancelled this way has its message requeued.
 func WithCloseTimeout(d time.Duration) SubscriberOption {
 	return func(cs *ClusterSubscriber) { cs.closeTimeout = d }
+}
+
+// WithVerifier verifies signed events with verifier instead of the HMAC
+// scheme the signing config would give, such as a certificate verifier. A
+// subscriber with a verifier rejects unsigned messages (see
+// SubscriptionOptions.AllowUnsigned).
+func WithVerifier(verifier eventbus.Verifier) SubscriberOption {
+	return func(cs *ClusterSubscriber) {
+		if verifier != nil {
+			cs.verifier = verifier
+		}
+	}
 }
 
 // NewClusterSubscriber creates a new cluster-aware event subscriber. With a
@@ -106,19 +118,12 @@ func newClusterSubscriber(config ClusterConfig, signingConfig *eventbus.Signatur
 // connected.
 func subscriberOn(cluster *ClusterAdapter, serviceName string, signingConfig *eventbus.SignatureConfig, signingRequired bool) *ClusterSubscriber {
 
-	// Initialize verifier if provided
-	var verifier *eventbus.EventVerifier
-	if signingConfig != nil {
-		verifier = eventbus.NewEventVerifier(signingConfig)
-	}
-
 	// Create context for background tasks
 	ctx, cancel := context.WithCancel(context.Background())
 
 	subscriber := &ClusterSubscriber{
 		cluster:     cluster,
 		serviceName: serviceName,
-		verifier:    verifier,
 		exchange:    eventbus.DefaultExchange,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -126,6 +131,9 @@ func subscriberOn(cluster *ClusterAdapter, serviceName string, signingConfig *ev
 		signingRequired: signingRequired,
 		handlers:        inflight.New(),
 		closeTimeout:    DefaultCloseTimeout,
+	}
+	if signingConfig != nil {
+		subscriber.verifier = eventbus.NewHMAC(signingConfig)
 	}
 
 	return subscriber
@@ -336,7 +344,11 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 		}
 	}()
 
-	event, err := decodeDelivery(delivery, cs.verifier, cs.signingRequired, opts.AllowUnsigned)
+	parent := opts.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	event, err := decodeDelivery(parent, delivery, cs.verifier, cs.signingRequired, opts.AllowUnsigned)
 	if err != nil {
 		var r *rejection
 		if !errors.As(err, &r) {

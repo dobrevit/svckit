@@ -1,6 +1,7 @@
 package eventbus
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,15 @@ const (
 	reasonUnsigned         = "unsigned_event_rejected"
 	reasonNoVerifier       = "no_verifier"
 )
+
+// handlerParent is the parent context of a subscription's work: its
+// SubscribeOptions.Context, or context.Background().
+func handlerParent(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
 
 // rejection is a delivery refused before its handler: it is dead-lettered,
 // never requeued, because redelivering it cannot change the outcome.
@@ -41,7 +51,7 @@ func (r *rejection) Unwrap() error { return r.err }
 // a migration to signing. A message that says it is signed is never accepted
 // without verification, and is rejected when there is no verifier to check
 // it, rather than parsed as an unsigned event (which yields a zero event).
-func decodeDelivery(d amqp.Delivery, verifier *EventVerifier, signingRequired, allowUnsigned bool) (*BaseEvent, error) {
+func decodeDelivery(ctx context.Context, d amqp.Delivery, verifier Verifier, signingRequired, allowUnsigned bool) (*BaseEvent, error) {
 	signed, _ := d.Headers["signed"].(bool)
 
 	if signed {
@@ -56,7 +66,7 @@ func decodeDelivery(d amqp.Delivery, verifier *EventVerifier, signingRequired, a
 		if signedEvent.Event == nil {
 			return nil, &rejection{reasonParseError, "unknown", errors.New("signed event has no event")}
 		}
-		if err := verifier.Verify(&signedEvent); err != nil {
+		if err := verifier.Verify(ctx, &signedEvent); err != nil {
 			return nil, &rejection{reasonInvalidSignature, signedEvent.Event.Type,
 				fmt.Errorf("signature verification failed for event %s from %s: %w",
 					signedEvent.Event.Type, signedEvent.Event.Source, err)}

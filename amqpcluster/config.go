@@ -1,11 +1,14 @@
 package amqpcluster
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dobrevit/svckit/eventbus"
 )
 
 // Config represents RabbitMQ cluster configuration
@@ -37,7 +40,9 @@ func LoadConfigFromEnv(serviceName string) (*Config, error) {
 	}
 
 	// Load signing configuration
-	config.loadSigningConfig()
+	if err := config.loadSigningConfig(); err != nil {
+		return nil, err
+	}
 
 	// Load optional settings
 	config.loadOptionalSettings()
@@ -140,16 +145,28 @@ func (c *Config) buildNodeURL(hostSuffix, portSuffix string) string {
 	return fmt.Sprintf("amqp://%s:%s@%s:%s%s", user, pass, host, port, vhost)
 }
 
-// loadSigningConfig loads event signing configuration
-func (c *Config) loadSigningConfig() {
+// loadSigningConfig loads event signing configuration. Without a key it
+// falls back to eventbus.DevelopmentSigningKey, unless
+// EVENT_SIGNING_KEY_REQUIRED=true, which makes a missing key, or that
+// published one, an error.
+func (c *Config) loadSigningConfig() error {
 	c.EventSigningKey = os.Getenv("EVENT_SIGNING_KEY")
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("EVENT_SIGNING_KEY_REQUIRED")), "true") {
+		switch c.EventSigningKey {
+		case "":
+			return errors.New("EVENT_SIGNING_KEY is not set, and EVENT_SIGNING_KEY_REQUIRED is true")
+		case eventbus.DevelopmentSigningKey:
+			return errors.New("EVENT_SIGNING_KEY is the development key published in svckit's source, and EVENT_SIGNING_KEY_REQUIRED is true")
+		}
+	}
 	if c.EventSigningKey == "" {
-		c.EventSigningKey = "dev-signing-key-change-in-production"
+		c.EventSigningKey = eventbus.DevelopmentSigningKey
 	}
 
 	if required := os.Getenv("EVENT_SIGNING_REQUIRED"); required != "" {
 		c.SigningRequired = strings.ToLower(required) == "true"
 	}
+	return nil
 }
 
 // loadOptionalSettings loads optional configuration settings

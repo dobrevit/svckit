@@ -1,6 +1,7 @@
 package eventbus
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -10,14 +11,30 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dobrevit/svckit/logging"
 )
 
 // SignatureConfig holds configuration for event signing
 type SignatureConfig struct {
-	SigningKey     []byte
-	ExpiryWindow   time.Duration // How long a signature is valid
-	RequiredClaims []string      // Required fields in the event for signing
+	SigningKey []byte
+
+	// ExpiryWindow is how long a signature is valid. The signer writes
+	// SignedAt plus its window into ExpiresAt; a verifier with a window of
+	// its own rejects a message older than that window, measured from
+	// SignedAt, whatever the message's ExpiresAt says, so the consumer
+	// decides how old a message it accepts (a retry schedule that outlasts
+	// the publisher's window needs that). A verifier with no window (zero
+	// or less) falls back to the message's ExpiresAt. EVENT_SIGNATURE_MAX_AGE
+	// sets it for LoadSignatureConfig and DefaultSignatureConfig; the
+	// default is 30 minutes.
+	ExpiryWindow   time.Duration
+	RequiredClaims []string // Required fields in the event for signing
 }
+
+// SchemeHMACSHA256 is the signature scheme of HMAC; a SignedEvent with an
+// empty Scheme, as every message before the field existed, is this one.
+const SchemeHMACSHA256 = "hmac-sha256"
 
 // SignedEvent extends BaseEvent with cryptographic signature
 type SignedEvent struct {
@@ -25,25 +42,109 @@ type SignedEvent struct {
 	Signature string     `json:"signature"`
 	SignedAt  time.Time  `json:"signed_at"`
 	ExpiresAt time.Time  `json:"expires_at"`
+
+	// Scheme names the signature scheme, so a verifier refuses a message
+	// signed with one it does not implement instead of misreading it.
+	Scheme string `json:"scheme,omitempty"`
 }
+
+// Signer signs events. HMAC is the shared-key implementation; publishers
+// take any Signer through WithSigner.
+type Signer interface {
+	Sign(ctx context.Context, event *BaseEvent) (*SignedEvent, error)
+}
+
+// Verifier checks a signed event's signature, scheme and age. HMAC is the
+// shared-key implementation; subscribers take any Verifier through
+// WithVerifier.
+type Verifier interface {
+	Verify(ctx context.Context, signed *SignedEvent) error
+}
+
+// DevelopmentSigningKey is the key DefaultSignatureConfig and
+// LoadSignatureConfig fall back to when none is configured. It is published
+// in this repository, so a service running on it signs nothing anyone could
+// not forge; LoadSignatureConfigStrict refuses it.
+const DevelopmentSigningKey = "dev-signing-key-change-in-production"
+
+// DefaultSignatureWindow is ExpiryWindow when EVENT_SIGNATURE_MAX_AGE is not
+// set.
+const DefaultSignatureWindow = 30 * time.Minute
 
 // DefaultSignatureConfig returns the default configuration for event signing
 func DefaultSignatureConfig() *SignatureConfig {
 	signingKey := []byte(os.Getenv("EVENT_SIGNING_KEY"))
 	if len(signingKey) == 0 {
 		// Fallback for development - DO NOT USE IN PRODUCTION
-		signingKey = []byte("dev-signing-key-change-in-production")
+		signingKey = []byte(DevelopmentSigningKey)
+	}
+
+	window, err := signatureMaxAge()
+	if err != nil {
+		logging.Warn("Ignoring %v; using %v", err, DefaultSignatureWindow)
+		window = DefaultSignatureWindow
 	}
 
 	return &SignatureConfig{
 		SigningKey:     signingKey,
-		ExpiryWindow:   30 * time.Minute, // Events expire after 30 minutes
+		ExpiryWindow:   window,
 		RequiredClaims: []string{"id", "type", "timestamp", "source"},
 	}
 }
 
+// signatureMaxAge reads EVENT_SIGNATURE_MAX_AGE, a Go duration.
+func signatureMaxAge() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("EVENT_SIGNATURE_MAX_AGE"))
+	if raw == "" {
+		return DefaultSignatureWindow, nil
+	}
+	window, err := time.ParseDuration(raw)
+	if err != nil || window <= 0 {
+		return 0, fmt.Errorf("EVENT_SIGNATURE_MAX_AGE %q is not a positive duration", raw)
+	}
+	return window, nil
+}
+
+// HMAC signs and verifies events with HMAC-SHA256 over one shared key. It
+// implements Signer and Verifier. Every holder of the key can sign as any
+// service; where that matters, use certificate signatures instead.
+type HMAC struct {
+	config *SignatureConfig
+	now    func() time.Time // nil means time.Now; tests replace it
+}
+
+// NewHMAC returns the HMAC scheme over config (DefaultSignatureConfig when
+// nil).
+func NewHMAC(config *SignatureConfig) *HMAC {
+	if config == nil {
+		config = DefaultSignatureConfig()
+	}
+	return &HMAC{config: config}
+}
+
+func (h *HMAC) clock() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
+}
+
+// Sign signs event.
+func (h *HMAC) Sign(_ context.Context, event *BaseEvent) (*SignedEvent, error) {
+	return signEventAt(event, h.config, h.clock())
+}
+
+// Verify checks signed's scheme, age and signature.
+func (h *HMAC) Verify(_ context.Context, signed *SignedEvent) error {
+	return verifyEventAt(signed, h.config, h.clock())
+}
+
 // SignEvent creates a cryptographically signed version of the event
 func SignEvent(event *BaseEvent, config *SignatureConfig) (*SignedEvent, error) {
+	return signEventAt(event, config, time.Now())
+}
+
+func signEventAt(event *BaseEvent, config *SignatureConfig, now time.Time) (*SignedEvent, error) {
 	if config == nil {
 		config = DefaultSignatureConfig()
 	}
@@ -59,7 +160,7 @@ func SignEvent(event *BaseEvent, config *SignatureConfig) (*SignedEvent, error) 
 		return nil, fmt.Errorf("event validation failed: %w", err)
 	}
 
-	signedAt := time.Now()
+	signedAt := now
 	expiresAt := signedAt.Add(config.ExpiryWindow)
 
 	// Create canonical representation for signing
@@ -79,11 +180,16 @@ func SignEvent(event *BaseEvent, config *SignatureConfig) (*SignedEvent, error) 
 		Signature: signature,
 		SignedAt:  signedAt,
 		ExpiresAt: expiresAt,
+		Scheme:    SchemeHMACSHA256,
 	}, nil
 }
 
 // VerifyEvent validates the cryptographic signature of a signed event
 func VerifyEvent(signedEvent *SignedEvent, config *SignatureConfig) error {
+	return verifyEventAt(signedEvent, config, time.Now())
+}
+
+func verifyEventAt(signedEvent *SignedEvent, config *SignatureConfig, now time.Time) error {
 	if config == nil {
 		config = DefaultSignatureConfig()
 	}
@@ -95,8 +201,20 @@ func VerifyEvent(signedEvent *SignedEvent, config *SignatureConfig) error {
 	// announces which key is in use. The signing side was fixed earlier; this
 	// half was missed.
 
-	// Check if signature has expired
-	if time.Now().After(signedEvent.ExpiresAt) {
+	if signedEvent == nil || signedEvent.Event == nil {
+		return fmt.Errorf("signed event has no event")
+	}
+	if signedEvent.Scheme != "" && signedEvent.Scheme != SchemeHMACSHA256 {
+		return fmt.Errorf("signature scheme %q is not %s", signedEvent.Scheme, SchemeHMACSHA256)
+	}
+
+	// Check if signature has expired: the verifier's own window when it has
+	// one, the message's ExpiresAt otherwise.
+	deadline := signedEvent.ExpiresAt
+	if config.ExpiryWindow > 0 {
+		deadline = signedEvent.SignedAt.Add(config.ExpiryWindow)
+	}
+	if now.After(deadline) {
 		return fmt.Errorf("event signature has expired")
 	}
 
