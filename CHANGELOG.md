@@ -8,45 +8,13 @@ releases.
 
 ## [Unreleased]
 
-### Fixed
+The messaging, database and shutdown fixes and additions of backlog items
+SK-1 to SK-15. Every item without a *Default change* label is a fix or is
+opt-in; the default changes below need a look before upgrading, since a patch
+version does not announce them.
 
-- **`amqpcluster` no longer stops publishing when a node's connection drops.**
-  The health check took the node's lock and then reconnected through a
-  function that took the same lock again, so the first closed connection hung
-  the health goroutine with the lock held, and every `Publish` after it
-  blocked. The reconnect now dials outside the lock and swaps the connection
-  in under it, so a slow dial no longer stalls node selection either; two
-  reconnects of one node no longer race, and a reconnect that finishes after
-  `Close` is discarded instead of leaked. *Fix; no API change.*
-- **A degraded `amqpcluster` node returns to service.** A failed publish
-  marks a node degraded, and the way back divided the node's total error
-  count by the time since a check timestamp it had just reset, so the rate
-  was infinite and the node stayed degraded until restart; with one node, a
-  single failed publish ended publishing. Each health check now measures the
-  errors since the previous one, and a degraded node whose connection and
-  channel are open and whose rate is below the new
-  `ClusterConfig.DegradedErrorRate` (errors per minute, default 1, today's
-  intent) is healthy again. A publish channel the broker closed is recreated
-  (only a nil one was). `GetNodeStats().ErrorCount` stays a running total.
-  The health check now skips a node checked within half an interval rather
-  than within a fixed ten seconds, so intervals below twenty seconds take
-  effect. *Fix; one new optional field.*
-- **`amqpcluster` consumers survive a reconnect, and prefetch is applied.** A
-  node's consumers ended with its connection and were never started again, and
-  a node that was down when `Subscribe` was called was never consumed from.
-  The adapter now remembers its subscriptions and the exchanges, queues and
-  bindings it declared, and after a node connects or reconnects (or its
-  subscribe channel is recreated after a channel error) replays the
-  declarations and resumes consuming into the same delivery channel.
-  `SubscriptionOptions.PrefetchCount` was accepted but never applied, so a
-  consumer received every ready message at once; it is now set with `Qos`
-  before each consume. *Fix, with two visible effects:*
-  `ClusterSubscriber.Subscribe`, whose default is `PrefetchCount: 1`, now
-  holds one unacknowledged message per node at a time (pass
-  `SubscribeWithOptions` with `PrefetchCount: 0` for the old unbounded
-  delivery); and the channel `ClusterAdapter.Subscribe` returns is now closed
-  by `Close`, so a `range` over it ends. `ClusterAdapter.Subscribe` itself
-  still sets no prefetch.
+### Changed (default changes)
+
 - **Subscribers that verify signatures reject unsigned messages.** *Default
   change (security).* Whether a message was verified depended on its `signed`
   header, which the sender sets: without it, `amqpcluster.ClusterSubscriber`
@@ -88,6 +56,55 @@ releases.
   messages is almost never intended. **Migration:** pass the new
   `eventbus.WithTransient()` to keep the old behaviour. The publisher
   constructors take `...PublisherOption` (source-compatible for callers).
+- **Handlers run on a context `Close` cancels, with a configurable timeout,
+  and `Close` waits for them.** *Small default change.* `eventbus` ran each
+  handler on `context.Background()` with a fixed 30-second timeout, and
+  `amqpcluster` on `context.Background()` with none; neither was cancelled on
+  `Close`, and `eventbus.Subscriber.Close` did not wait for a handler in
+  flight, so a shutdown cut a handler off mid-work or left it running past
+  the process's grace period. Now `Close`, in both subscribers, stops handing
+  messages to handlers (one already delivered goes back to its queue),
+  cancels the consumers, waits for running handlers up to a close timeout
+  (`WithCloseTimeout`, a new constructor option in both packages, default
+  10 s), then cancels their context; a handler cancelled that way has its
+  message requeued. `Close` returns within the close timeout plus a second,
+  even with a handler that ignores its context (the broker requeues its
+  message when the channel closes). New per subscription:
+  `Context` (the handlers' parent) and `HandlerTimeout` (`eventbus`: zero
+  keeps 30 s, negative means none; `amqpcluster`: zero keeps none).
+  **What changes:** a handler still running when `Close` is called now sees
+  its context cancelled after the close timeout instead of running on.
+  Timeouts are otherwise unchanged. The subscriber constructors take
+  `...SubscriberOption` (source-compatible for callers).
+- **Per-message logs move to Debug and carry no user id.** *Default change,
+  log output only.* `eventbus.Subscriber` logged `Processing event: <type>
+  for user: <user id>` at Info for every message, and both packages logged
+  each publish, verification and successful handling at Info: a user id is
+  personal data in most deployments, and a line per message at Info is noise
+  at any volume. Those lines are now Debug and name the event type and id,
+  never the user; failure lines keep the type, the id and the error, never
+  the body. Accepting an unsigned message stays a Warn where signatures are
+  otherwise verified (`AllowUnsigned`), and is Debug on a subscriber that
+  verifies nothing. Metrics are unchanged.
+- **`lifecycle` drains HTTP before it stops background work, within a
+  configurable budget.** *Default change.* `WaitForShutdownSignal` cancelled
+  the background work (subscribers, periodic tasks) first and only then gave
+  `server.Shutdown` a fixed five seconds, the opposite of what the package
+  documentation says; an in-flight request that needed a background
+  component failed during the drain. It now drains HTTP (requests still
+  running after the drain timeout are cut), then cancels the background work
+  and waits for it within what is left of the shutdown budget, then runs the
+  cleanup functions. `NewManager(name, ...Option)` takes
+  `WithDrainTimeout` (default 5 s), `WithShutdownBudget` (default 30 s), and
+  `WithShutdownOrder(func(ctx) error)` to replace the sequence.
+  **Migration:** for the old order, pass a custom order (the
+  `WithShutdownOrder` doc shows one). Cleanup functions now run after the
+  background work has stopped, not before: background work must end when the
+  manager is dying (`Dying()`), not when a cleanup function closes its
+  resource, or it waits out the budget.
+
+### Added
+
 - **A publish can return only after the broker confirms it, and unroutable
   messages are reported.** *Opt-in.* Without confirms a nil error from a
   publish means the frame reached the socket, not that the broker stored the
@@ -155,36 +172,6 @@ releases.
   `eventbus.Attempt(ctx)`. Without a policy nothing changes. Enable it on a
   new queue: the main queue's dead-letter arguments differ, and RabbitMQ
   refuses to redeclare an existing queue with different arguments.
-- **Handlers run on a context `Close` cancels, with a configurable timeout,
-  and `Close` waits for them.** *Small default change.* `eventbus` ran each
-  handler on `context.Background()` with a fixed 30-second timeout, and
-  `amqpcluster` on `context.Background()` with none; neither was cancelled on
-  `Close`, and `eventbus.Subscriber.Close` did not wait for a handler in
-  flight, so a shutdown cut a handler off mid-work or left it running past
-  the process's grace period. Now `Close`, in both subscribers, stops handing
-  messages to handlers (one already delivered goes back to its queue),
-  cancels the consumers, waits for running handlers up to a close timeout
-  (`WithCloseTimeout`, a new constructor option in both packages, default
-  10 s), then cancels their context; a handler cancelled that way has its
-  message requeued. `Close` returns within the close timeout plus a second,
-  even with a handler that ignores its context (the broker requeues its
-  message when the channel closes). New per subscription:
-  `Context` (the handlers' parent) and `HandlerTimeout` (`eventbus`: zero
-  keeps 30 s, negative means none; `amqpcluster`: zero keeps none).
-  **What changes:** a handler still running when `Close` is called now sees
-  its context cancelled after the close timeout instead of running on.
-  Timeouts are otherwise unchanged. The subscriber constructors take
-  `...SubscriberOption` (source-compatible for callers).
-- **Per-message logs move to Debug and carry no user id.** *Default change,
-  log output only.* `eventbus.Subscriber` logged `Processing event: <type>
-  for user: <user id>` at Info for every message, and both packages logged
-  each publish, verification and successful handling at Info: a user id is
-  personal data in most deployments, and a line per message at Info is noise
-  at any volume. Those lines are now Debug and name the event type and id,
-  never the user; failure lines keep the type, the id and the error, never
-  the body. Accepting an unsigned message stays a Warn where signatures are
-  otherwise verified (`AllowUnsigned`), and is Debug on a subscriber that
-  verifies nothing. Metrics are unchanged.
 - **`pgcluster` opens lib/pq or pgx by configuration, and SQLSTATE checks
   work with either.** *Opt-in; the default stays pgx.*
   `ClusterConfig.DriverName` existed, but `LoadConfigFromEnv` never set it,
@@ -204,22 +191,56 @@ releases.
   `Run` starts and shuts down with the first; `/health` and `/ready` stay on
   the main listener, where orchestrators probe. `New` refuses an operations
   address on the main port. Without the option nothing changes.
-- **`lifecycle` drains HTTP before it stops background work, within a
-  configurable budget.** *Default change.* `WaitForShutdownSignal` cancelled
-  the background work (subscribers, periodic tasks) first and only then gave
-  `server.Shutdown` a fixed five seconds, the opposite of what the package
-  documentation says; an in-flight request that needed a background
-  component failed during the drain. It now drains HTTP (requests still
-  running after the drain timeout are cut), then cancels the background work
-  and waits for it within what is left of the shutdown budget, then runs the
-  cleanup functions. `NewManager(name, ...Option)` takes
-  `WithDrainTimeout` (default 5 s), `WithShutdownBudget` (default 30 s), and
-  `WithShutdownOrder(func(ctx) error)` to replace the sequence.
-  **Migration:** for the old order, pass a custom order (the
-  `WithShutdownOrder` doc shows one). Cleanup functions now run after the
-  background work has stopped, not before: background work must end when the
-  manager is dying (`Dying()`), not when a cleanup function closes its
-  resource, or it waits out the budget.
+
+### Deprecated
+
+- The word matching that decides whether an unmarked handler error is retried
+  (both subscribers), in favour of `eventbus.Retryable` / `eventbus.Permanent`;
+  see *Handlers mark errors retryable or permanent* above. It will be removed
+  in a later release.
+
+### Fixed
+
+- **`amqpcluster` no longer stops publishing when a node's connection drops.**
+  The health check took the node's lock and then reconnected through a
+  function that took the same lock again, so the first closed connection hung
+  the health goroutine with the lock held, and every `Publish` after it
+  blocked. The reconnect now dials outside the lock and swaps the connection
+  in under it, so a slow dial no longer stalls node selection either; two
+  reconnects of one node no longer race, and a reconnect that finishes after
+  `Close` is discarded instead of leaked. *Fix; no API change.*
+- **A degraded `amqpcluster` node returns to service.** A failed publish
+  marks a node degraded, and the way back divided the node's total error
+  count by the time since a check timestamp it had just reset, so the rate
+  was infinite and the node stayed degraded until restart; with one node, a
+  single failed publish ended publishing. Each health check now measures the
+  errors since the previous one, and a degraded node whose connection and
+  channel are open and whose rate is below the new
+  `ClusterConfig.DegradedErrorRate` (errors per minute, default 1, today's
+  intent) is healthy again. A publish channel the broker closed is recreated
+  (only a nil one was). `GetNodeStats().ErrorCount` stays a running total.
+  The health check now skips a node checked within half an interval rather
+  than within a fixed ten seconds, so intervals below twenty seconds take
+  effect. *Fix; one new optional field.*
+- **`amqpcluster` consumers survive a reconnect, and prefetch is applied.** A
+  node's consumers ended with its connection and were never started again, and
+  a node that was down when `Subscribe` was called was never consumed from.
+  The adapter now remembers its subscriptions and the exchanges, queues and
+  bindings it declared, and after a node connects or reconnects (or its
+  subscribe channel is recreated after a channel error) replays the
+  declarations and resumes consuming into the same delivery channel.
+  `SubscriptionOptions.PrefetchCount` was accepted but never applied, so a
+  consumer received every ready message at once; it is now set with `Qos`
+  before each consume. *Fix, with two visible effects:*
+  `ClusterSubscriber.Subscribe`, whose default is `PrefetchCount: 1`, now
+  holds one unacknowledged message per node at a time (pass
+  `SubscribeWithOptions` with `PrefetchCount: 0` for the old unbounded
+  delivery); and the channel `ClusterAdapter.Subscribe` returns is now closed
+  by `Close`, so a `range` over it ends. `ClusterAdapter.Subscribe` itself
+  still sets no prefetch.
+
+### Development
+
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in
