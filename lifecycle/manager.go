@@ -21,14 +21,67 @@ type Manager struct {
 	// started records whether any goroutine was ever handed to the tomb.
 	// See Wait for why that has to be tracked.
 	started atomic.Bool
+
+	drainTimeout   time.Duration
+	shutdownBudget time.Duration
+	shutdownOrder  func(ctx context.Context) error
+}
+
+const (
+	// DefaultDrainTimeout is how long in-flight HTTP requests get to finish
+	// at shutdown before they are cut.
+	DefaultDrainTimeout = 5 * time.Second
+
+	// DefaultShutdownBudget bounds the whole shutdown: the drain, the
+	// background work and the cleanup.
+	DefaultShutdownBudget = 30 * time.Second
+)
+
+// Option adjusts a Manager when it is created.
+type Option func(*Manager)
+
+// WithDrainTimeout sets how long in-flight HTTP requests get to finish at
+// shutdown (default DefaultDrainTimeout); requests still running then are
+// cut.
+func WithDrainTimeout(d time.Duration) Option {
+	return func(m *Manager) { m.drainTimeout = d }
+}
+
+// WithShutdownBudget bounds the whole shutdown (default
+// DefaultShutdownBudget). Background work still running when the budget is
+// spent is abandoned, so the process exits on time.
+func WithShutdownBudget(d time.Duration) Option {
+	return func(m *Manager) { m.shutdownBudget = d }
+}
+
+// WithShutdownOrder replaces the shutdown sequence with order, which runs
+// with a context bounded by the shutdown budget. The server and cleanup
+// functions given to WaitForShutdownSignal are then not used; order does
+// all of it. For the order before v0.1.5, which cancelled background work
+// before draining HTTP:
+//
+//	lifecycle.WithShutdownOrder(func(ctx context.Context) error {
+//		m.Kill(nil)
+//		_ = server.Shutdown(ctx)
+//		// cleanup...
+//		return m.Wait()
+//	})
+func WithShutdownOrder(order func(ctx context.Context) error) Option {
+	return func(m *Manager) { m.shutdownOrder = order }
 }
 
 // NewManager creates a new tomb manager for a service
-func NewManager(serviceName string) *Manager {
-	return &Manager{
-		tomb: &tomb.Tomb{},
-		name: serviceName,
+func NewManager(serviceName string, opts ...Option) *Manager {
+	m := &Manager{
+		tomb:           &tomb.Tomb{},
+		name:           serviceName,
+		drainTimeout:   DefaultDrainTimeout,
+		shutdownBudget: DefaultShutdownBudget,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Go starts a new goroutine managed by the tomb
@@ -113,7 +166,22 @@ func (m *Manager) runPeriodicTask(interval time.Duration, taskFunc func() error,
 	}
 }
 
-// WaitForShutdownSignal waits for interrupt signal and gracefully shuts down
+// WaitForShutdownSignal waits for SIGINT or SIGTERM and then shuts down in
+// the order the package doc describes:
+//
+//  1. the HTTP server stops accepting connections and in-flight requests get
+//     the drain timeout (WithDrainTimeout) to finish; any still running then
+//     are cut;
+//  2. the background work is cancelled (Kill), and waited for within what is
+//     left of the shutdown budget (WithShutdownBudget);
+//  3. the cleanup functions run, in order; a failing one does not stop the
+//     rest.
+//
+// Draining first means a request still running can rely on the background
+// components it uses (a publisher, a queue consumer) until it finishes. The
+// whole shutdown stays within the budget: background work that ignores its
+// cancellation is abandoned, and logged. WithShutdownOrder replaces the
+// sequence.
 func (m *Manager) WaitForShutdownSignal(server *http.Server, additionalCleanup ...func() error) {
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -122,28 +190,45 @@ func (m *Manager) WaitForShutdownSignal(server *http.Server, additionalCleanup .
 	<-quit
 	logging.Info("Shutting down %s...", m.name)
 
-	// Kill tomb to stop all goroutines
-	m.Kill(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), m.shutdownBudget)
+	defer cancel()
 
-	// Shutdown HTTP server if provided
-	if server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			logging.Error("Server forced to shutdown: %v", err)
+	if m.shutdownOrder != nil {
+		if err := m.shutdownOrder(ctx); err != nil {
+			logging.Error("Shutdown of %s failed: %v", m.name, err)
 		}
+		logging.Info("%s exiting", m.name)
+		return
 	}
 
-	// Run additional cleanup functions
+	// 1. Drain HTTP.
+	if server != nil {
+		drainCtx, cancelDrain := context.WithTimeout(ctx, m.drainTimeout)
+		if err := server.Shutdown(drainCtx); err != nil {
+			logging.Warn("Requests still running after the %v drain were cut: %v", m.drainTimeout, err)
+			_ = server.Close()
+		}
+		cancelDrain()
+	}
+
+	// 2. Stop the background work, within the budget.
+	m.Kill(nil)
+	waited := make(chan error, 1)
+	go func() { waited <- m.Wait() }()
+	select {
+	case err := <-waited:
+		if err != nil {
+			logging.Error("Error waiting for goroutines to finish: %v", err)
+		}
+	case <-ctx.Done():
+		logging.Error("Background work of %s did not stop within the %v shutdown budget; abandoning it", m.name, m.shutdownBudget)
+	}
+
+	// 3. Run additional cleanup functions
 	for _, cleanup := range additionalCleanup {
 		if err := cleanup(); err != nil {
 			logging.Error("Error during cleanup: %v", err)
 		}
-	}
-
-	// Wait for all goroutines to finish
-	if err := m.Wait(); err != nil {
-		logging.Error("Error waiting for goroutines to finish: %v", err)
 	}
 
 	logging.Info("%s exiting", m.name)

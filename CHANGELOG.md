@@ -204,6 +204,22 @@ releases.
   `Run` starts and shuts down with the first; `/health` and `/ready` stay on
   the main listener, where orchestrators probe. `New` refuses an operations
   address on the main port. Without the option nothing changes.
+- **`lifecycle` drains HTTP before it stops background work, within a
+  configurable budget.** *Default change.* `WaitForShutdownSignal` cancelled
+  the background work (subscribers, periodic tasks) first and only then gave
+  `server.Shutdown` a fixed five seconds, the opposite of what the package
+  documentation says; an in-flight request that needed a background
+  component failed during the drain. It now drains HTTP (requests still
+  running after the drain timeout are cut), then cancels the background work
+  and waits for it within what is left of the shutdown budget, then runs the
+  cleanup functions. `NewManager(name, ...Option)` takes
+  `WithDrainTimeout` (default 5 s), `WithShutdownBudget` (default 30 s), and
+  `WithShutdownOrder(func(ctx) error)` to replace the sequence.
+  **Migration:** for the old order, pass a custom order (the
+  `WithShutdownOrder` doc shows one). Cleanup functions now run after the
+  background work has stopped, not before: background work must end when the
+  manager is dying (`Dying()`), not when a cleanup function closes its
+  resource, or it waits out the budget.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in
