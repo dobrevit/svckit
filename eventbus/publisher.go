@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dobrevit/svckit/internal/amqpconfirm"
 	"github.com/dobrevit/svckit/logging"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -26,7 +27,33 @@ type Publisher struct {
 	signer         *EventSigner
 	requireSigning bool
 	deliveryMode   uint8
+
+	confirmTimeout time.Duration
+	confirms       bool
+	confirmer      *amqpconfirm.Publisher // set when confirms is
 }
+
+// The outcomes of a publish on a publisher with confirms (WithConfirms). They
+// are also what amqpcluster's publishers return with
+// ClusterConfig.PublisherConfirms.
+var (
+	// ErrUnroutable is matched (errors.Is) by a *ReturnedError: no queue was
+	// bound to receive the message, so the broker returned it.
+	ErrUnroutable = amqpconfirm.ErrUnroutable
+
+	// ErrNacked means the broker refused the message, for instance a queue at
+	// its length limit with x-overflow: reject-publish.
+	ErrNacked = amqpconfirm.ErrNacked
+
+	// ErrConfirmTimeout means no confirmation arrived within the timeout. The
+	// broker may still have stored the message; a retry can duplicate it,
+	// which consumers that deduplicate by message id absorb.
+	ErrConfirmTimeout = amqpconfirm.ErrConfirmTimeout
+)
+
+// ReturnedError is a message the broker returned as unroutable, with its
+// reply code and text.
+type ReturnedError = amqpconfirm.ReturnedError
 
 // PublisherOption adjusts a Publisher when it is created.
 type PublisherOption func(*Publisher)
@@ -39,6 +66,20 @@ type PublisherOption func(*Publisher)
 // worthless after a restart, such as cache invalidations.
 func WithTransient() PublisherOption {
 	return func(p *Publisher) { p.deliveryMode = amqp.Transient }
+}
+
+// WithConfirms makes Publish return only once the broker has confirmed the
+// message, so a nil error means the broker stored it rather than that it
+// left this process. Messages are published mandatory: one that no queue is
+// bound to receive comes back as ErrUnroutable instead of being dropped. A
+// refused message is ErrNacked, no answer within timeout is
+// ErrConfirmTimeout (zero means five seconds), and a cancelled ctx returns
+// ctx.Err(). Each publish waits for one round trip to the broker.
+func WithConfirms(timeout time.Duration) PublisherOption {
+	return func(p *Publisher) {
+		p.confirms = true
+		p.confirmTimeout = timeout
+	}
 }
 
 // NewPublisher creates a new event publisher
@@ -94,6 +135,14 @@ func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *Sig
 	for _, opt := range opts {
 		opt(publisher)
 	}
+	if publisher.confirms {
+		confirmer, err := amqpconfirm.New(amqpconfirm.AMQPChannel{Channel: ch}, publisher.confirmTimeout)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		publisher.confirmer = confirmer
+	}
 
 	// Update connection status
 	UpdateConnectionStatus(serviceName, "publisher", true)
@@ -103,51 +152,29 @@ func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *Sig
 
 // Publish publishes an event to the event bus with optional signing
 func (p *Publisher) Publish(ctx context.Context, event *BaseEvent) error {
-	var body []byte
-	var err error
-	var headers amqp.Table
-
 	// Check if signing is enabled
 	if p.signer != nil {
 		return p.PublishSigned(ctx, event)
 	}
 
 	// Publish unsigned event
-	body, err = event.ToJSON()
+	body, err := event.ToJSON()
 	if err != nil {
 		RecordEventPublished(event.Type, p.serviceName, "error")
 		return err
 	}
 
-	headers = amqp.Table{
+	headers := amqp.Table{
 		"signed":     false,
 		"source":     event.Source,
 		"event_type": event.Type,
 		"event_id":   event.ID,
 	}
 
-	err = p.channel.Publish(
-		DefaultExchange, // exchange
-		event.Type,      // routing key
-		false,           // mandatory
-		false,           // immediate
-		amqp.Publishing{
-			ContentType:  "application/json",
-			Body:         body,
-			Headers:      headers,
-			Timestamp:    time.Now(),
-			MessageId:    event.ID,
-			DeliveryMode: p.deliveryMode,
-		},
-	)
-
-	if err != nil {
-		RecordEventPublished(event.Type, p.serviceName, "error")
+	if err := p.send(ctx, event, body, headers); err != nil {
 		return err
 	}
-
 	logging.Warn("⚠️  Published unsigned event: %s (ID: %s)", event.Type, event.ID)
-	RecordEventPublished(event.Type, p.serviceName, "success")
 	return nil
 }
 
@@ -182,30 +209,36 @@ func (p *Publisher) PublishSigned(ctx context.Context, event *BaseEvent) error {
 		"event_id":   event.ID,
 	}
 
-	err = p.channel.Publish(
-		DefaultExchange, // exchange
-		event.Type,      // routing key
-		false,           // mandatory
-		false,           // immediate
-		amqp.Publishing{
-			ContentType:  "application/json",
-			Body:         body,
-			Headers:      headers,
-			Timestamp:    time.Now(),
-			MessageId:    event.ID,
-			DeliveryMode: p.deliveryMode,
-		},
-	)
-
-	if err != nil {
-		RecordEventPublished(event.Type, p.serviceName, "error")
+	if err := p.send(ctx, event, body, headers); err != nil {
 		return err
 	}
-
 	logging.Info("✅ Published signed event: %s (ID: %s, Signature: %.8s...)",
 		event.Type, event.ID, signedEvent.Signature)
-	RecordEventPublished(event.Type, p.serviceName, "success")
 	return nil
+}
+
+// send publishes one message to the default exchange, routed by the event
+// type, waits for the broker's confirmation when confirms are on, and
+// records the outcome.
+func (p *Publisher) send(ctx context.Context, event *BaseEvent, body []byte, headers amqp.Table) error {
+	msg := amqp.Publishing{
+		ContentType:  "application/json",
+		Body:         body,
+		Headers:      headers,
+		Timestamp:    time.Now(),
+		MessageId:    event.ID,
+		DeliveryMode: p.deliveryMode,
+	}
+
+	var err error
+	if p.confirmer != nil {
+		err = p.confirmer.Publish(ctx, DefaultExchange, event.Type, msg)
+	} else {
+		err = p.channel.Publish(DefaultExchange, event.Type, false, false, msg)
+	}
+
+	RecordEventPublished(event.Type, p.serviceName, amqpconfirm.Status(err))
+	return err
 }
 
 // TestConnection tests the RabbitMQ connection health

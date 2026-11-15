@@ -1,6 +1,7 @@
 package amqpcluster
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -58,7 +59,7 @@ func failOnePublish(t *testing.T, ca *ClusterAdapter, n *Node) {
 	n.publishCh = broken
 	n.mutex.Unlock()
 
-	if err := ca.publishToNode(n, "events", "order.created", false, false, amqp.Publishing{}); err == nil {
+	if err := ca.publishToNode(context.Background(), n, "events", "order.created", false, false, amqp.Publishing{}); err == nil {
 		t.Fatal("a publish on a closed channel succeeded")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dobrevit/svckit/internal/amqpconfirm"
 	"github.com/dobrevit/svckit/logging"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -31,6 +32,7 @@ type Node struct {
 	conn        amqpConnection
 	publishCh   amqpChannel
 	subscribeCh amqpChannel
+	confirmer   *amqpconfirm.Publisher // on publishCh, with PublisherConfirms
 	state       NodeState
 	lastError   error
 	lastCheck   time.Time
@@ -75,6 +77,20 @@ type ClusterConfig struct {
 	// the default 30-second interval a degraded node recovers after one
 	// health interval without errors.
 	DegradedErrorRate float64
+
+	// PublisherConfirms puts every publish channel in confirm mode, so that
+	// Publish returns only once the broker has confirmed the message: nil
+	// means the broker stored it. Messages are published mandatory, so one
+	// no queue is bound to receive comes back as eventbus.ErrUnroutable;
+	// a refusal is eventbus.ErrNacked, and no answer within ConfirmTimeout
+	// eventbus.ErrConfirmTimeout. Only a publish that never reached a broker
+	// fails over to another node: a nacked or returned message reached one
+	// that said no, and a timed-out one may have been stored.
+	PublisherConfirms bool
+
+	// ConfirmTimeout bounds the wait for a confirmation; zero means five
+	// seconds.
+	ConfirmTimeout time.Duration
 }
 
 // ClusterAdapter manages connections to multiple RabbitMQ nodes
@@ -213,7 +229,7 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	}
 	defer node.connecting.Store(false)
 
-	conn, publishCh, subscribeCh, err := ca.openNode(node)
+	conn, publishCh, confirmer, subscribeCh, err := ca.openNode(node)
 
 	node.mutex.Lock()
 	if err == nil && ca.closed.Load() {
@@ -231,6 +247,7 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	previous := node.conn
 	node.conn = conn
 	node.publishCh = publishCh
+	node.confirmer = confirmer
 	node.subscribeCh = subscribeCh
 	node.state = NodeHealthy
 	node.lastError = nil
@@ -252,9 +269,10 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	return nil
 }
 
-// openNode dials a node and opens its publish and subscribe channels. It
-// touches no node state, so it needs no lock.
-func (ca *ClusterAdapter) openNode(node *Node) (amqpConnection, amqpChannel, amqpChannel, error) {
+// openNode dials a node and opens its publish channel (in confirm mode, with
+// its confirmer, when PublisherConfirms is set) and its subscribe channel.
+// It touches no node state, so it needs no lock.
+func (ca *ClusterAdapter) openNode(node *Node) (amqpConnection, amqpChannel, *amqpconfirm.Publisher, amqpChannel, error) {
 	dial := ca.dial
 	if dial == nil {
 		dial = dialBroker
@@ -262,22 +280,41 @@ func (ca *ClusterAdapter) openNode(node *Node) (amqpConnection, amqpChannel, amq
 
 	conn, err := dial(node.URL)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to connect to %s: %w", maskCredentials(node.URL), err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to connect to %s: %w", maskCredentials(node.URL), err)
 	}
 
-	publishCh, err := conn.Channel()
+	publishCh, confirmer, err := ca.openPublishChannel(conn)
 	if err != nil {
 		_ = conn.Close() // the connection is unusable without a channel
-		return nil, nil, nil, fmt.Errorf("failed to create publish channel for %s: %w", maskCredentials(node.URL), err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to create publish channel for %s: %w", maskCredentials(node.URL), err)
 	}
 
 	subscribeCh, err := conn.Channel()
 	if err != nil {
 		_ = conn.Close() // closes publishCh with it
-		return nil, nil, nil, fmt.Errorf("failed to create subscribe channel for %s: %w", maskCredentials(node.URL), err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to create subscribe channel for %s: %w", maskCredentials(node.URL), err)
 	}
 
-	return conn, publishCh, subscribeCh, nil
+	return conn, publishCh, confirmer, subscribeCh, nil
+}
+
+// openPublishChannel opens a publish channel on conn and, with
+// PublisherConfirms, puts it in confirm mode. A confirmer belongs to one
+// channel, so every new publish channel gets its own.
+func (ca *ClusterAdapter) openPublishChannel(conn amqpConnection) (amqpChannel, *amqpconfirm.Publisher, error) {
+	ch, err := conn.Channel()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ca.config.PublisherConfirms {
+		return ch, nil, nil
+	}
+	confirmer, err := amqpconfirm.New(ch, ca.config.ConfirmTimeout)
+	if err != nil {
+		_ = ch.Close()
+		return nil, nil, err
+	}
+	return ch, confirmer, nil
 }
 
 // getHealthyNodes returns a list of currently healthy nodes
@@ -442,53 +479,113 @@ func (ca *ClusterAdapter) BindQueue(queueName, routingKey, exchangeName string, 
 	return nil
 }
 
-// Publish publishes a message to one of the healthy nodes with failover
+// Publish publishes a message to one of the healthy nodes with failover. It
+// is PublishWithContext without a context.
 func (ca *ClusterAdapter) Publish(exchange, routingKey string, mandatory, immediate bool, msg amqp.Publishing) error {
-	// Try primary node selection first
-	node := ca.selectNodeForPublish(routingKey)
-	if node != nil {
-		if err := ca.publishToNode(node, exchange, routingKey, mandatory, immediate, msg); err == nil {
+	return ca.PublishWithContext(context.Background(), exchange, routingKey, mandatory, immediate, msg)
+}
+
+// PublishWithContext publishes a message to one of the healthy nodes, chosen
+// by the load-balancing strategy, and fails over to the others. With
+// PublisherConfirms it waits for the broker's confirmation (see
+// ClusterConfig.PublisherConfirms), publishes mandatory whatever mandatory
+// says, and fails over only a publish that never reached a broker.
+func (ca *ClusterAdapter) PublishWithContext(ctx context.Context, exchange, routingKey string, mandatory, immediate bool, msg amqp.Publishing) error {
+	tried := make(map[*Node]bool)
+	var lastErr error
+
+	attempt := func(node *Node) (done bool) {
+		tried[node] = true
+		err := ca.publishToNode(ctx, node, exchange, routingKey, mandatory, immediate, msg)
+		lastErr = err
+		if err == nil {
 			atomic.AddInt64(&node.publishCount, 1)
-			return nil
+			return true
+		}
+		return !failsOver(err)
+	}
+
+	// Try primary node selection first
+	if node := ca.selectNodeForPublish(routingKey); node != nil {
+		if attempt(node) {
+			return lastErr
 		}
 	}
 
 	// If primary failed, try all other healthy nodes
-	healthy := ca.getHealthyNodes()
-	for _, node := range healthy {
-		if err := ca.publishToNode(node, exchange, routingKey, mandatory, immediate, msg); err == nil {
-			atomic.AddInt64(&node.publishCount, 1)
-			return nil
+	for _, node := range ca.getHealthyNodes() {
+		if tried[node] {
+			continue
+		}
+		if attempt(node) {
+			return lastErr
 		}
 	}
 
-	return errors.New("failed to publish message to any healthy node")
+	if lastErr == nil {
+		return errors.New("failed to publish message to any healthy node")
+	}
+	return fmt.Errorf("failed to publish message to any healthy node: %w", lastErr)
 }
 
-// publishToNode publishes to a specific node
-func (ca *ClusterAdapter) publishToNode(node *Node, exchange, routingKey string, mandatory, immediate bool, msg amqp.Publishing) error {
+// failsOver reports whether a failed publish may be tried on another node.
+// Without confirms every failure is a failure to send. With them, a nacked
+// or returned message reached a broker that said no, and a timed-out one may
+// have been stored, so sending it elsewhere would duplicate or override that
+// answer; only a publish that never reached a broker fails over. A cancelled
+// context ends the attempt.
+func failsOver(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	switch {
+	case errors.Is(err, amqpconfirm.ErrNacked),
+		errors.Is(err, amqpconfirm.ErrUnroutable),
+		errors.Is(err, amqpconfirm.ErrConfirmTimeout):
+		return false
+	}
+	return true
+}
+
+// publishToNode publishes to a specific node. A failure that says the node
+// is in trouble (the message could not be sent, or no confirmation came)
+// counts against it and degrades it; a nack or a return is the broker
+// working as intended and does not.
+func (ca *ClusterAdapter) publishToNode(ctx context.Context, node *Node, exchange, routingKey string, mandatory, immediate bool, msg amqp.Publishing) error {
 	node.mutex.RLock()
 	ch := node.publishCh
+	confirmer := node.confirmer
 	node.mutex.RUnlock()
 
 	if ch == nil {
 		return errors.New("node channel is nil")
 	}
 
-	if err := ch.Publish(exchange, routingKey, mandatory, immediate, msg); err != nil {
-		atomic.AddInt64(&node.errorCount, 1)
-		atomic.AddInt64(&node.windowErrors, 1)
-		// Mark node as degraded if it fails
-		node.mutex.Lock()
-		if node.state == NodeHealthy {
-			node.state = NodeDegraded
-			logging.Warn("Node %s marked as degraded due to publish error: %v", node.Name, err)
-		}
-		node.mutex.Unlock()
+	var err error
+	if confirmer != nil {
+		err = confirmer.Publish(ctx, exchange, routingKey, msg)
+	} else {
+		err = ch.Publish(exchange, routingKey, mandatory, immediate, msg)
+	}
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, amqpconfirm.ErrNacked) || errors.Is(err, amqpconfirm.ErrUnroutable) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 
-	return nil
+	atomic.AddInt64(&node.errorCount, 1)
+	atomic.AddInt64(&node.windowErrors, 1)
+	// Mark node as degraded if it fails
+	node.mutex.Lock()
+	if node.state == NodeHealthy {
+		node.state = NodeDegraded
+		logging.Warn("Node %s marked as degraded due to publish error: %v", node.Name, err)
+	}
+	node.mutex.Unlock()
+	return err
 }
 
 // Subscribe consumes messages from a queue on all healthy nodes, and keeps
@@ -684,7 +781,7 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (action healthAction) {
 	// connection to drop.
 	if node.publishCh == nil || node.publishCh.IsClosed() {
 		logging.Warn("Node %s publish channel is closed, recreating", node.Name)
-		ch, err := node.conn.Channel()
+		ch, confirmer, err := ca.openPublishChannel(node.conn)
 		if err != nil {
 			logging.Error("Failed to recreate publish channel for node %s: %v", node.Name, err)
 			node.state = NodeFailed
@@ -692,6 +789,7 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (action healthAction) {
 			return nothingToDo
 		}
 		node.publishCh = ch
+		node.confirmer = confirmer
 	}
 
 	// The same for the subscribe channel, whose consumers closed with it.

@@ -1,6 +1,7 @@
 package amqpcluster
 
 import (
+	"github.com/dobrevit/svckit/internal/amqpconfirm"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -13,9 +14,12 @@ type amqpConnection interface {
 	Close() error
 }
 
-// amqpChannel is the part of *amqp.Channel the adapter uses; *amqp.Channel
-// satisfies it as it is.
+// amqpChannel is the part of *amqp.Channel the adapter uses, plus the
+// confirm-mode publish of amqpconfirm.Channel; amqpconfirm.AMQPChannel, a
+// *amqp.Channel with that one method added, satisfies it.
 type amqpChannel interface {
+	amqpconfirm.Channel
+
 	IsClosed() bool
 	Close() error
 	Publish(exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error
@@ -39,7 +43,7 @@ func (c brokerConnection) Channel() (amqpChannel, error) {
 		// Not ch: a nil *amqp.Channel in an interface is not a nil interface.
 		return nil, err
 	}
-	return ch, nil
+	return amqpconfirm.AMQPChannel{Channel: ch}, nil
 }
 
 func dialBroker(url string) (amqpConnection, error) {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dobrevit/svckit/eventbus"
+	"github.com/dobrevit/svckit/internal/amqpconfirm"
 	"github.com/dobrevit/svckit/logging"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -21,14 +22,21 @@ type ClusterPublisher struct {
 
 // NewClusterPublisher creates a new cluster-aware event publisher
 func NewClusterPublisher(nodes []string, serviceName string, signingConfig *eventbus.SignatureConfig) (*ClusterPublisher, error) {
-	config := ClusterConfig{
+	return NewClusterPublisherWithConfig(ClusterConfig{
 		Nodes:               nodes,
 		ServiceName:         serviceName,
 		HealthCheckInterval: 30 * time.Second,
 		RetryAttempts:       3,
 		LoadBalanceStrategy: "round_robin",
-	}
+	}, signingConfig)
+}
 
+// NewClusterPublisherWithConfig creates a publisher over an adapter built
+// from config, for the settings NewClusterPublisher fixes; chiefly
+// PublisherConfirms, which makes Publish return only once the broker has
+// confirmed the message.
+func NewClusterPublisherWithConfig(config ClusterConfig, signingConfig *eventbus.SignatureConfig) (*ClusterPublisher, error) {
+	serviceName := config.ServiceName
 	cluster, err := NewClusterAdapter(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cluster adapter: %w", err)
@@ -121,7 +129,7 @@ func (cp *ClusterPublisher) publishSigned(ctx context.Context, event *eventbus.B
 	}
 
 	// Publish with cluster failover
-	if err := cp.cluster.Publish(cp.exchange, event.Type, false, false, msg); err != nil {
+	if err := cp.send(ctx, event, msg); err != nil {
 		return fmt.Errorf("failed to publish signed event to cluster: %w", err)
 	}
 
@@ -156,12 +164,19 @@ func (cp *ClusterPublisher) publishUnsigned(ctx context.Context, event *eventbus
 	}
 
 	// Publish with cluster failover
-	if err := cp.cluster.Publish(cp.exchange, event.Type, false, false, msg); err != nil {
+	if err := cp.send(ctx, event, msg); err != nil {
 		return fmt.Errorf("failed to publish unsigned event to cluster: %w", err)
 	}
 
 	logging.Info("Published unsigned event %s (ID: %s) via cluster", event.Type, event.ID)
 	return nil
+}
+
+// send publishes msg, routed by the event type, and records the outcome.
+func (cp *ClusterPublisher) send(ctx context.Context, event *eventbus.BaseEvent, msg amqp.Publishing) error {
+	err := cp.cluster.PublishWithContext(ctx, cp.exchange, event.Type, false, false, msg)
+	eventbus.RecordEventPublished(event.Type, cp.serviceName, amqpconfirm.Status(err))
+	return err
 }
 
 // TestConnection tests connectivity to the cluster

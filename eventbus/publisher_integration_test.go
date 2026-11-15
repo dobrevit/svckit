@@ -7,9 +7,11 @@ package eventbus_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,4 +232,162 @@ func TestPersistentMessagesSurviveABrokerRestart(t *testing.T) {
 			t.Errorf("the transient message survived the restart (found %v, err %v)", ok, err)
 		}
 	})
+}
+
+// confirmingPublisher is a publisher with confirms on rabbitmq-test.
+func confirmingPublisher(t *testing.T, timeout time.Duration) *eventbus.Publisher {
+	t.Helper()
+	pub, err := eventbus.NewPublisherWithService(testRabbitURL(), "eventbus-it", eventbus.WithConfirms(timeout))
+	if err != nil {
+		t.Fatalf("NewPublisherWithService(WithConfirms): %v", err)
+	}
+	t.Cleanup(func() { _ = pub.Close() })
+	return pub
+}
+
+// rejectingQueue declares a queue bound for one event type that refuses
+// every message: a length limit of zero with reject-publish overflow, so the
+// broker nacks a publish routed to it.
+func rejectingQueue(t *testing.T, eventType string) {
+	t.Helper()
+	queue := fmt.Sprintf("svckit.it.reject.%d", time.Now().UnixNano())
+	withBroker(t, func(ch *amqp.Channel) {
+		if _, err := ch.QueueDeclare(queue, false, false, false, false, amqp.Table{
+			"x-max-length": int32(0),
+			"x-overflow":   "reject-publish",
+		}); err != nil {
+			t.Fatalf("declare %s: %v", queue, err)
+		}
+		if err := ch.QueueBind(queue, eventType, eventbus.DefaultExchange, false, nil); err != nil {
+			t.Fatalf("bind %s: %v", queue, err)
+		}
+	})
+	t.Cleanup(func() {
+		withBroker(t, func(ch *amqp.Channel) { _, _ = ch.QueueDelete(queue, false, false, false) })
+	})
+}
+
+func uniqueType(prefix string) string {
+	return fmt.Sprintf("%s.%d", prefix, time.Now().UnixNano())
+}
+
+func TestConfirmedPublishOutcomes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pub := confirmingPublisher(t, 5*time.Second)
+	ctx := context.Background()
+
+	t.Run("a bound queue confirms", func(t *testing.T) {
+		eventType := uniqueType("it.confirm.bound")
+		queue := boundQueue(t, eventType)
+		if err := pub.Publish(ctx, eventbus.NewEvent(eventType, "eventbus-it", nil)); err != nil {
+			t.Fatalf("Publish = %v, want nil after the broker's ack", err)
+		}
+		next(t, queue)
+	})
+
+	t.Run("no binding is unroutable", func(t *testing.T) {
+		err := pub.Publish(ctx, eventbus.NewEvent(uniqueType("it.confirm.nobody"), "eventbus-it", nil))
+		var returned *eventbus.ReturnedError
+		if !errors.Is(err, eventbus.ErrUnroutable) || !errors.As(err, &returned) {
+			t.Fatalf("Publish = %v, want ErrUnroutable", err)
+		}
+		if returned.ReplyCode != 312 {
+			t.Errorf("reply code = %d, want 312 (NO_ROUTE)", returned.ReplyCode)
+		}
+	})
+
+	t.Run("a queue that rejects publishes nacks", func(t *testing.T) {
+		eventType := uniqueType("it.confirm.reject")
+		rejectingQueue(t, eventType)
+		if err := pub.Publish(ctx, eventbus.NewEvent(eventType, "eventbus-it", nil)); !errors.Is(err, eventbus.ErrNacked) {
+			t.Fatalf("Publish = %v, want ErrNacked", err)
+		}
+	})
+}
+
+// A thousand publishes on one publisher at once, half routable and half not:
+// each gets its own outcome.
+func TestConcurrentConfirmedPublishes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pub := confirmingPublisher(t, 30*time.Second)
+	routable := uniqueType("it.confirm.many")
+	queue := boundQueue(t, routable)
+	unroutable := uniqueType("it.confirm.many.nobody")
+
+	const n = 1000
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			eventType := routable
+			if i%2 == 1 {
+				eventType = unroutable
+			}
+			errs[i] = pub.Publish(context.Background(), eventbus.NewEvent(eventType, "eventbus-it", nil))
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if i%2 == 0 && err != nil {
+			t.Fatalf("routable publish %d: %v", i, err)
+		}
+		if i%2 == 1 && !errors.Is(err, eventbus.ErrUnroutable) {
+			t.Fatalf("unroutable publish %d: %v, want ErrUnroutable", i, err)
+		}
+	}
+	withBroker(t, func(ch *amqp.Channel) {
+		state, err := ch.QueueDeclarePassive(queue, false, false, false, false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Messages != n/2 {
+			t.Errorf("%d messages in the bound queue, want %d", state.Messages, n/2)
+		}
+	})
+}
+
+// With the broker frozen nothing is confirmed: the publish returns after its
+// timeout, or when its context ends, whichever is first.
+func TestConfirmedPublishToAPausedBroker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	const timeout = 2 * time.Second
+	pub := confirmingPublisher(t, timeout)
+	eventType := uniqueType("it.confirm.paused")
+	boundQueue(t, eventType)
+
+	pause := func() {
+		if out, err := exec.Command("docker", "compose", "pause", "rabbitmq-test").CombinedOutput(); err != nil {
+			t.Fatalf("docker compose pause: %v\n%s", err, out)
+		}
+	}
+	unpause := func() { _ = exec.Command("docker", "compose", "unpause", "rabbitmq-test").Run() }
+	pause()
+	t.Cleanup(unpause)
+
+	start := time.Now()
+	err := pub.Publish(context.Background(), eventbus.NewEvent(eventType, "eventbus-it", nil))
+	elapsed := time.Since(start)
+	if !errors.Is(err, eventbus.ErrConfirmTimeout) {
+		t.Fatalf("Publish = %v, want ErrConfirmTimeout", err)
+	}
+	if elapsed < timeout || elapsed > timeout+time.Second {
+		t.Errorf("returned after %v, want the %v timeout plus at most a second", elapsed, timeout)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := pub.Publish(ctx, eventbus.NewEvent(eventType, "eventbus-it", nil)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Publish with a 300ms context = %v, want context.DeadlineExceeded", err)
+	}
+
+	unpause()
 }

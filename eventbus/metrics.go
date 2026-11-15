@@ -90,7 +90,10 @@ var (
 	)
 )
 
-// RecordEventPublished records an event publication
+// RecordEventPublished records an event publication. The publishers use the
+// statuses "success" and "error", and with confirms also "returned" (no
+// queue took the message), "nacked" (the broker refused it) and "timeout"
+// (no confirmation in time).
 func RecordEventPublished(eventType, service, status string) {
 	EventsPublished.WithLabelValues(eventType, service, status).Inc()
 }

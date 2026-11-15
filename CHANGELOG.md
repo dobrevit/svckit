@@ -88,6 +88,29 @@ releases.
   messages is almost never intended. **Migration:** pass the new
   `eventbus.WithTransient()` to keep the old behaviour. The publisher
   constructors take `...PublisherOption` (source-compatible for callers).
+- **A publish can return only after the broker confirms it, and unroutable
+  messages are reported.** *Opt-in.* Without confirms a nil error from a
+  publish means the frame reached the socket, not that the broker stored the
+  message, and a message no queue was bound to was dropped without a trace.
+  `eventbus.WithConfirms(timeout)` and the new
+  `amqpcluster.ClusterConfig.PublisherConfirms` / `ConfirmTimeout` put the
+  publish channel in confirm mode (again after every reconnect), publish
+  mandatory, and wait for the broker: nil once it stored the message,
+  `eventbus.ErrUnroutable` (a `*eventbus.ReturnedError` with the reply code
+  and text) when no queue took it, `eventbus.ErrNacked` when it refused it,
+  `eventbus.ErrConfirmTimeout` with no answer in time (default 5 s), and
+  `ctx.Err()` when the context ends first. `amqpcluster` does not fail over a
+  nacked, returned or timed-out message, which reached a broker; only a
+  publish that never reached one goes to another node. Nacks and returns no
+  longer count against a node's health. `RecordEventPublished` gains the
+  statuses `returned`, `nacked` and `timeout`. Both publishers share one
+  implementation (`internal/amqpconfirm`). New:
+  `amqpcluster.NewClusterPublisherWithConfig` (to set `PublisherConfirms`)
+  and `ClusterAdapter.PublishWithContext`; `ClusterPublisher.Publish` now
+  honours its `ctx` and records publish metrics, which it did not.
+  Unchanged without the option, except that `ClusterAdapter.Publish`'s
+  final error now wraps the last node's error and failover no longer retries
+  the node that just failed.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in
