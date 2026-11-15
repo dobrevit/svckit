@@ -279,8 +279,29 @@ func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *Si
 	return subscriber, nil
 }
 
+// SubscribeOptions adjusts one subscription. The zero value is what
+// Subscribe uses.
+type SubscribeOptions struct {
+	// AllowUnsigned lets unsigned messages reach the handler (with a Warn)
+	// even though the subscriber has a verifier. A subscriber with a verifier
+	// otherwise dead-letters them: the "signed" header is set by the sender,
+	// so trusting its absence would let anyone who can publish skip
+	// verification. Use it only while the publishers of a queue migrate to
+	// signing. It is refused when the subscriber requires signing.
+	AllowUnsigned bool
+}
+
 // Subscribe subscribes to events with the given routing key
 func (s *Subscriber) Subscribe(queueName string, routingKey string, handler EventHandler) error {
+	return s.SubscribeWithOptions(queueName, routingKey, handler, SubscribeOptions{})
+}
+
+// SubscribeWithOptions is Subscribe with per-subscription options.
+func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, handler EventHandler, opts SubscribeOptions) error {
+	if opts.AllowUnsigned && s.requireSigning {
+		return errors.New("AllowUnsigned conflicts with a subscriber that requires signing")
+	}
+
 	// Declare dead letter queue first
 	dlqName := queueName + ".dlq"
 	_, err := s.channel.QueueDeclare(
@@ -371,52 +392,23 @@ func (s *Subscriber) Subscribe(queueName string, routingKey string, handler Even
 					}
 				}()
 
-				// Check if message is signed
-				var event *BaseEvent
-				isSigned, exists := d.Headers["signed"].(bool)
-
-				if exists && isSigned && s.verifier != nil {
-					// Parse as signed event
-					var signedEvent SignedEvent
-					if err := json.Unmarshal(d.Body, &signedEvent); err != nil {
-						logging.Error("Error parsing signed event JSON: %v", err)
-						RecordEventDLQ("unknown", s.serviceName, queueName, "parse_error")
-						nack(d, false)
-						return
+				event, err := decodeDelivery(d, s.verifier, s.requireSigning, opts.AllowUnsigned)
+				if err != nil {
+					var r *rejection
+					if !errors.As(err, &r) {
+						r = &rejection{reason: reasonParseError, eventType: "unknown", err: err}
 					}
-
-					// Verify signature
-					if err := s.verifier.Verify(&signedEvent); err != nil {
-						logging.Error("🚨 SECURITY ALERT: Invalid signature for event %s from %s: %v",
-							signedEvent.Event.Type, signedEvent.Event.Source, err)
-						RecordEventDLQ(signedEvent.Event.Type, s.serviceName, queueName, "invalid_signature")
-						nack(d, false) // Don't requeue security failures
-						return
+					if r.reason == reasonParseError {
+						logging.Error("Error parsing event: %v", err)
+					} else {
+						logging.Error("🚨 SECURITY ALERT: %v", err)
 					}
-
-					event = signedEvent.Event
+					RecordEventDLQ(r.eventType, s.serviceName, queueName, r.reason)
+					nack(d, false) // Dead-letter: redelivery cannot change the outcome
+					return
+				}
+				if signed, _ := d.Headers["signed"].(bool); signed {
 					logging.Info("✅ Verified signed event: %s (ID: %s)", event.Type, event.ID)
-				} else {
-					// Handle unsigned event
-					if s.requireSigning && (!exists || !isSigned) {
-						logging.Error("🚨 SECURITY ALERT: Unsigned event rejected (signing required)")
-						RecordEventDLQ("unknown", s.serviceName, queueName, "unsigned_event_rejected")
-						nack(d, false)
-						return
-					}
-
-					var err error
-					event, err = FromJSON(d.Body)
-					if err != nil {
-						logging.Error("Error parsing event JSON: %v", err)
-						RecordEventDLQ("unknown", s.serviceName, queueName, "parse_error")
-						nack(d, false)
-						return
-					}
-
-					if !exists || !isSigned {
-						logging.Warn("⚠️  Processing unsigned event: %s (ID: %s)", event.Type, event.ID)
-					}
 				}
 
 				// Record event received

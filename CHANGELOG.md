@@ -47,6 +47,27 @@ releases.
   delivery); and the channel `ClusterAdapter.Subscribe` returns is now closed
   by `Close`, so a `range` over it ends. `ClusterAdapter.Subscribe` itself
   still sets no prefetch.
+- **Subscribers that verify signatures reject unsigned messages.** *Default
+  change (security).* Whether a message was verified depended on its `signed`
+  header, which the sender sets: without it, `amqpcluster.ClusterSubscriber`
+  handed the message to the handler with a Warn even when built with a
+  verifier, so anyone who could publish to the exchange skipped verification
+  by leaving out one header. `app.New` builds exactly that subscriber. Now a
+  subscriber with a verifier, in `amqpcluster` and in `eventbus`, dead-letters
+  any message that is not signed and verified (reason
+  `unsigned_event_rejected`), and a message marked signed reaching a
+  subscriber with no verifier is dead-lettered (`no_verifier`) instead of
+  being parsed as an unsigned event, which gave the handler a zero event.
+  `amqpcluster.ClusterSubscriber` now records these in `RecordEventDLQ` as
+  `eventbus.Subscriber` does.
+  **Migration:** a consumer that still receives unsigned messages from some
+  publishers sets `AllowUnsigned: true` on that subscription
+  (`amqpcluster.SubscriptionOptions`, or the new
+  `eventbus.SubscribeOptions` through `Subscriber.SubscribeWithOptions`) until
+  they sign. `AllowUnsigned` is refused on a subscriber that requires signing:
+  `eventbus`'s `requireSigning`, or `Config.SigningRequired` through the new
+  `amqpcluster.NewClusterSubscriberWithConfig`, which also applies the
+  config's health interval, retries and load balancing.
 - `compose.yaml` gains `rabbitmq-test-2` (port 5674, `RABBITMQ_URL_2`), an
   independent second broker for the multi-node integration tests.
 

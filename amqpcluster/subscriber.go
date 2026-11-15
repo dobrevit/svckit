@@ -2,7 +2,7 @@ package amqpcluster
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -19,22 +19,59 @@ type ClusterSubscriber struct {
 	verifier    *eventbus.EventVerifier
 	exchange    string
 
+	// signingRequired is Config.SigningRequired: unsigned messages are
+	// rejected, and no subscription may opt out with AllowUnsigned.
+	signingRequired bool
+
 	// Background task management
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// NewClusterSubscriber creates a new cluster-aware event subscriber
+// NewClusterSubscriber creates a new cluster-aware event subscriber. With a
+// signing config it verifies signed messages and dead-letters unsigned ones;
+// see SubscriptionOptions.AllowUnsigned for the exception.
 func NewClusterSubscriber(nodes []string, serviceName string, signingConfig *eventbus.SignatureConfig) (*ClusterSubscriber, error) {
-	config := ClusterConfig{
+	return newClusterSubscriber(ClusterConfig{
 		Nodes:               nodes,
 		ServiceName:         serviceName,
 		HealthCheckInterval: 30 * time.Second,
 		RetryAttempts:       3,
 		LoadBalanceStrategy: "round_robin",
+	}, signingConfig, false)
+}
+
+// NewClusterSubscriberWithConfig creates a subscriber from a Config, as
+// LoadConfigFromEnv returns it: its nodes, health interval, retries and load
+// balancing, its signing key, and SigningRequired, which NewClusterSubscriber
+// has no way to take. With SigningRequired, unsigned messages are
+// dead-lettered and a subscription asking for AllowUnsigned is refused, so a
+// deployment's policy cannot be relaxed in code.
+func NewClusterSubscriberWithConfig(config Config) (*ClusterSubscriber, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
 
+	var signingConfig *eventbus.SignatureConfig
+	if config.EventSigningKey != "" {
+		signingConfig = eventbus.DefaultSignatureConfig()
+		signingConfig.SigningKey = []byte(config.EventSigningKey)
+	} else if config.SigningRequired {
+		return nil, errors.New("event signing is required but no signing key is configured")
+	}
+
+	return newClusterSubscriber(ClusterConfig{
+		Nodes:               config.Nodes,
+		ServiceName:         config.ServiceName,
+		HealthCheckInterval: config.HealthCheckInterval,
+		RetryAttempts:       config.RetryAttempts,
+		LoadBalanceStrategy: config.LoadBalanceStrategy,
+	}, signingConfig, config.SigningRequired)
+}
+
+func newClusterSubscriber(config ClusterConfig, signingConfig *eventbus.SignatureConfig, signingRequired bool) (*ClusterSubscriber, error) {
+	serviceName := config.ServiceName
 	cluster, err := NewClusterAdapter(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cluster adapter: %w", err)
@@ -56,6 +93,8 @@ func NewClusterSubscriber(nodes []string, serviceName string, signingConfig *eve
 		exchange:    eventbus.DefaultExchange,
 		ctx:         ctx,
 		cancel:      cancel,
+
+		signingRequired: signingRequired,
 	}
 
 	return subscriber, nil
@@ -84,10 +123,22 @@ type SubscriptionOptions struct {
 	// limit, so the broker sends every ready message at once; Subscribe uses 1.
 	PrefetchCount int
 	TTL           time.Duration // Message TTL
+
+	// AllowUnsigned lets unsigned messages reach the handler (with a Warn)
+	// even though the subscriber verifies signatures. Without it they are
+	// dead-lettered: the "signed" header is set by the sender, so trusting
+	// its absence would let anyone who can publish skip verification. Use it
+	// only while a queue's publishers migrate to signing. It is refused when
+	// the subscriber was built with Config.SigningRequired.
+	AllowUnsigned bool
 }
 
 // SubscribeWithOptions subscribes with custom options
 func (cs *ClusterSubscriber) SubscribeWithOptions(queueName, routingPattern string, handler eventbus.EventHandler, opts SubscriptionOptions) error {
+	if opts.AllowUnsigned && cs.signingRequired {
+		return errors.New("AllowUnsigned conflicts with a subscriber that requires signing")
+	}
+
 	// Setup queue infrastructure on all nodes
 	if err := cs.setupQueue(queueName, routingPattern, opts); err != nil {
 		return fmt.Errorf("failed to setup queue infrastructure: %w", err)
@@ -110,7 +161,7 @@ func (cs *ClusterSubscriber) SubscribeWithOptions(queueName, routingPattern stri
 	cs.wg.Add(1)
 	go func() {
 		defer cs.wg.Done()
-		cs.processMessages(msgs, handler, opts.AutoAck)
+		cs.processMessages(queueName, msgs, handler, opts)
 	}()
 
 	logging.Info("Subscribed to queue %s with pattern %s on cluster", queueName, routingPattern)
@@ -172,7 +223,7 @@ func (cs *ClusterSubscriber) setupQueue(queueName, routingPattern string, opts S
 }
 
 // processMessages handles incoming messages from the cluster with context cancellation
-func (cs *ClusterSubscriber) processMessages(msgs <-chan amqp.Delivery, handler eventbus.EventHandler, autoAck bool) {
+func (cs *ClusterSubscriber) processMessages(queueName string, msgs <-chan amqp.Delivery, handler eventbus.EventHandler, opts SubscriptionOptions) {
 	for {
 		select {
 		case delivery, ok := <-msgs:
@@ -180,7 +231,7 @@ func (cs *ClusterSubscriber) processMessages(msgs <-chan amqp.Delivery, handler 
 				logging.Info("Messages channel closed, stopping message processing")
 				return
 			}
-			cs.handleMessage(delivery, handler, autoAck)
+			cs.handleMessage(queueName, delivery, handler, opts)
 		case <-cs.ctx.Done():
 			logging.Info("Message processing stopped due to context cancellation")
 			return
@@ -189,7 +240,8 @@ func (cs *ClusterSubscriber) processMessages(msgs <-chan amqp.Delivery, handler 
 }
 
 // handleMessage processes a single message with error handling
-func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler eventbus.EventHandler, autoAck bool) {
+func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Delivery, handler eventbus.EventHandler, opts SubscriptionOptions) {
+	autoAck := opts.AutoAck
 	defer func() {
 		if r := recover(); r != nil {
 			logging.Error("Panic while handling message: %v", r)
@@ -199,33 +251,25 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 		}
 	}()
 
-	// Check if message is signed
-	isSigned := false
-	if signed, ok := delivery.Headers["signed"]; ok {
-		if signedBool, ok := signed.(bool); ok {
-			isSigned = signedBool
-		}
-	}
-
-	var event *eventbus.BaseEvent
-	var err error
-
-	if isSigned {
-		event, err = cs.handleSignedMessage(delivery)
-	} else {
-		event, err = cs.handleUnsignedMessage(delivery)
-	}
-
+	event, err := decodeDelivery(delivery, cs.verifier, cs.signingRequired, opts.AllowUnsigned)
 	if err != nil {
-		logging.Error("Failed to parse message: %v", err)
+		var r *rejection
+		if !errors.As(err, &r) {
+			r = &rejection{reason: reasonParseError, eventType: "unknown", err: err}
+		}
+		if r.reason == reasonParseError {
+			logging.Error("Failed to parse message: %v", err)
+		} else {
+			logging.Error("🚨 SECURITY ALERT: %v", err)
+		}
+		eventbus.RecordEventDLQ(r.eventType, cs.serviceName, queueName, r.reason)
 		if !autoAck {
-			if cs.isRetryableError(err) {
-				nack(delivery, true) // Requeue for retry
-			} else {
-				nack(delivery, false) // Send to DLQ
-			}
+			nack(delivery, false) // Dead-letter: redelivery cannot change the outcome
 		}
 		return
+	}
+	if signed, _ := delivery.Headers["signed"].(bool); signed {
+		logging.Info("✅ Verified signed event: %s (ID: %s)", event.Type, event.ID)
 	}
 
 	// Create context for handler
@@ -253,40 +297,6 @@ func (cs *ClusterSubscriber) handleMessage(delivery amqp.Delivery, handler event
 	if !autoAck {
 		ack(delivery)
 	}
-}
-
-// handleSignedMessage processes a signed message
-func (cs *ClusterSubscriber) handleSignedMessage(delivery amqp.Delivery) (*eventbus.BaseEvent, error) {
-	if cs.verifier == nil {
-		return nil, fmt.Errorf("received signed message but no verifier configured")
-	}
-
-	// Parse signed event
-	var signedEvent eventbus.SignedEvent
-	if err := json.Unmarshal(delivery.Body, &signedEvent); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal signed event: %w", err)
-	}
-
-	// Verify signature
-	if err := cs.verifier.Verify(&signedEvent); err != nil {
-		logging.Error("🚨 SECURITY ALERT: Invalid signature for event %s from %s: %v",
-			signedEvent.Event.Type, signedEvent.Event.Source, err)
-		return nil, fmt.Errorf("signature verification failed: %w", err)
-	}
-
-	logging.Info("✅ Verified signed event: %s (ID: %s)", signedEvent.Event.Type, signedEvent.Event.ID)
-	return signedEvent.Event, nil
-}
-
-// handleUnsignedMessage processes an unsigned message
-func (cs *ClusterSubscriber) handleUnsignedMessage(delivery amqp.Delivery) (*eventbus.BaseEvent, error) {
-	var event eventbus.BaseEvent
-	if err := json.Unmarshal(delivery.Body, &event); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal unsigned event: %w", err)
-	}
-
-	logging.Warn("⚠️ Processing unsigned event: %s (ID: %s)", event.Type, event.ID)
-	return &event, nil
 }
 
 // isRetryableError determines if an error is worth retrying
