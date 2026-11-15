@@ -345,6 +345,45 @@ type SubscribeOptions struct {
 	// verification. Use it only while the publishers of a queue migrate to
 	// signing. It is refused when the subscriber requires signing.
 	AllowUnsigned bool
+
+	// QueueTTL is the queue's x-message-ttl: a message that waits longer for
+	// a consumer is dead-lettered. Zero keeps the default of five minutes;
+	// NoQueueTTL (any negative value) declares the queue without one, so
+	// messages wait for a consumer however long it is down.
+	//
+	// The default stays five minutes deliberately. RabbitMQ refuses to
+	// redeclare an existing queue with different arguments
+	// (PRECONDITION_FAILED, and the channel is closed), so changing it would
+	// stop every existing consumer from starting against its own queue. A
+	// new queue should choose its TTL here, or leave it to a broker policy,
+	// which can change without a redeclare. An existing queue keeps the
+	// arguments it was declared with until it is deleted.
+	QueueTTL time.Duration
+}
+
+// NoQueueTTL as a QueueTTL (eventbus.SubscribeOptions,
+// amqpcluster.SubscriptionOptions.TTL) declares a queue without a message
+// TTL. Any negative duration means the same.
+const NoQueueTTL time.Duration = -1
+
+// defaultQueueTTL is the x-message-ttl a queue gets when no TTL is chosen.
+// Its value must not change: the broker refuses a redeclare whose arguments
+// differ from the queue's.
+const defaultQueueTTL = 300000 // 5 minutes, in milliseconds
+
+// queueArguments are the arguments of a subscriber's main queue.
+func queueArguments(dlqName string, ttl time.Duration) amqp.Table {
+	args := amqp.Table{
+		"x-dead-letter-exchange":    DefaultExchange,
+		"x-dead-letter-routing-key": dlqName,
+	}
+	switch {
+	case ttl == 0:
+		args["x-message-ttl"] = defaultQueueTTL
+	case ttl > 0:
+		args["x-message-ttl"] = int64(ttl / time.Millisecond)
+	}
+	return args
 }
 
 // Subscribe subscribes to events with the given routing key
@@ -379,11 +418,7 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 		false,     // delete when unused
 		false,     // exclusive
 		false,     // no-wait
-		amqp.Table{
-			"x-dead-letter-exchange":    DefaultExchange,
-			"x-dead-letter-routing-key": dlqName,
-			"x-message-ttl":             300000, // 5 minutes
-		}, // arguments
+		queueArguments(dlqName, opts.QueueTTL), // arguments
 	)
 	if err != nil {
 		return err

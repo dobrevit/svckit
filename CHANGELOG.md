@@ -111,6 +111,19 @@ releases.
   Unchanged without the option, except that `ClusterAdapter.Publish`'s
   final error now wraps the last node's error and failover no longer retries
   the node that just failed.
+- **The queue TTL is configurable.** *Opt-in; the default is kept.* Every
+  queue an `eventbus.Subscriber` declares had a hard-coded five-minute
+  `x-message-ttl`, so any message waiting longer for a consumer (one down for
+  a deploy, a backlog) was dead-lettered, and a consumer outage became a DLQ
+  to drain by hand. `eventbus.SubscribeOptions.QueueTTL` chooses it per
+  subscription, as `amqpcluster.SubscriptionOptions.TTL` already did; for
+  both, the new `eventbus.NoQueueTTL` (or any negative value) declares the
+  queue without one. The five-minute default stays on purpose: RabbitMQ
+  refuses to redeclare an existing queue with a different TTL
+  (`PRECONDITION_FAILED`, and the channel closes), so changing it would stop
+  every existing consumer from starting against its own queue. A new queue
+  should choose its TTL, or leave it to a broker policy, which can change
+  without a redeclare.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in

@@ -122,7 +122,14 @@ type SubscriptionOptions struct {
 	// each consumer (one per node) before it waits for an ack. Zero sets no
 	// limit, so the broker sends every ready message at once; Subscribe uses 1.
 	PrefetchCount int
-	TTL           time.Duration // Message TTL
+
+	// TTL is the queue's x-message-ttl: a message that waits longer for a
+	// consumer is dead-lettered. Zero keeps the default of five minutes;
+	// eventbus.NoQueueTTL (any negative value) declares the queue without
+	// one. The default stays five minutes because RabbitMQ refuses to
+	// redeclare an existing queue with different arguments; see
+	// eventbus.SubscribeOptions.QueueTTL.
+	TTL time.Duration
 
 	// AllowUnsigned lets unsigned messages reach the handler (with a Warn)
 	// even though the subscriber verifies signatures. Without it they are
@@ -196,10 +203,12 @@ func (cs *ClusterSubscriber) setupQueue(queueName, routingPattern string, opts S
 		"x-dead-letter-routing-key": dlqName,
 	}
 
-	// Add TTL if specified
-	if opts.TTL > 0 {
+	// The message TTL: the option, the five-minute default for zero, none
+	// for a negative value.
+	switch {
+	case opts.TTL > 0:
 		queueArgs["x-message-ttl"] = int64(opts.TTL / time.Millisecond)
-	} else {
+	case opts.TTL == 0:
 		queueArgs["x-message-ttl"] = int64(5 * time.Minute / time.Millisecond) // Default 5 minutes
 	}
 

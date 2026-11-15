@@ -64,6 +64,7 @@ type fakeChannel struct {
 	qos       []int
 	consumers map[string]chan amqp.Delivery // by consumer tag
 	declared  []string
+	queueArgs map[string]amqp.Table
 	closeOnce sync.Once
 }
 
@@ -106,7 +107,13 @@ func (ch *fakeChannel) ExchangeDeclare(name, _ string, _, _, _, _ bool, _ amqp.T
 	return ch.record("exchange " + name)
 }
 
-func (ch *fakeChannel) QueueDeclare(name string, _, _, _, _ bool, _ amqp.Table) (amqp.Queue, error) {
+func (ch *fakeChannel) QueueDeclare(name string, _, _, _, _ bool, args amqp.Table) (amqp.Queue, error) {
+	ch.mu.Lock()
+	if ch.queueArgs == nil {
+		ch.queueArgs = make(map[string]amqp.Table)
+	}
+	ch.queueArgs[name] = args
+	ch.mu.Unlock()
 	return amqp.Queue{Name: name}, ch.record("queue " + name)
 }
 
