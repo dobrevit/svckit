@@ -18,6 +18,19 @@ releases.
   in under it, so a slow dial no longer stalls node selection either; two
   reconnects of one node no longer race, and a reconnect that finishes after
   `Close` is discarded instead of leaked. *Fix; no API change.*
+- **A degraded `amqpcluster` node returns to service.** A failed publish
+  marks a node degraded, and the way back divided the node's total error
+  count by the time since a check timestamp it had just reset, so the rate
+  was infinite and the node stayed degraded until restart; with one node, a
+  single failed publish ended publishing. Each health check now measures the
+  errors since the previous one, and a degraded node whose connection and
+  channel are open and whose rate is below the new
+  `ClusterConfig.DegradedErrorRate` (errors per minute, default 1, today's
+  intent) is healthy again. A publish channel the broker closed is recreated
+  (only a nil one was). `GetNodeStats().ErrorCount` stays a running total.
+  The health check now skips a node checked within half an interval rather
+  than within a fixed ten seconds, so intervals below twenty seconds take
+  effect. *Fix; one new optional field.*
 
 ## [0.1.4] - 2026-11-15
 

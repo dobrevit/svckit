@@ -120,3 +120,66 @@ func TestPublishSucceedsAfterTheBrokerDropsTheConnection(t *testing.T) {
 		t.Errorf("node state after the reconnect = %v, want NodeHealthy", stats.State)
 	}
 }
+
+// A publish to an exchange that does not exist makes the broker close the
+// channel (404 NOT_FOUND) but not the connection. The next publish fails and
+// degrades the node; with one node, that used to end publishing until the
+// process restarted.
+func TestPublishSucceedsAfterTheBrokerClosesTheChannel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	queue := fmt.Sprintf("svckit.it.recover.%d", time.Now().UnixNano())
+	withBroker(t, func(ch *amqp.Channel) {
+		if _, err := ch.QueueDeclare(queue, false, false, false, false, nil); err != nil {
+			t.Fatalf("declare %s: %v", queue, err)
+		}
+	})
+	t.Cleanup(func() {
+		withBroker(t, func(ch *amqp.Channel) { _, _ = ch.QueueDelete(queue, false, false, false) })
+	})
+
+	ca, err := NewClusterAdapter(ClusterConfig{
+		Nodes:               []string{testRabbitURL()},
+		ServiceName:         "amqpcluster-it",
+		HealthCheckInterval: 250 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClusterAdapter: %v", err)
+	}
+	defer ca.Close()
+
+	missing := fmt.Sprintf("svckit.it.missing.%d", time.Now().UnixNano())
+	_ = ca.Publish(missing, "anything", false, false, amqp.Publishing{Body: []byte("lost")})
+
+	// The channel closes asynchronously, so a publish just after the bad one
+	// can be accepted by the client and discarded by the broker. Publish and
+	// look for the message until one arrives.
+	body := []byte("published after the channel closed")
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for {
+		if lastErr = ca.Publish("", queue, false, false, amqp.Publishing{Body: body}); lastErr == nil {
+			var got bool
+			withBroker(t, func(ch *amqp.Channel) {
+				msg, ok, err := ch.Get(queue, true)
+				if err != nil {
+					t.Fatalf("get from %s: %v", queue, err)
+				}
+				got = ok && string(msg.Body) == string(body)
+			})
+			if got {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no message reached %s within 15s of the channel closing; last publish error: %v", queue, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if stats := ca.GetNodeStats()["node-0"]; stats.State != NodeHealthy || stats.ErrorCount == 0 {
+		t.Errorf("node state %v with %d errors; want healthy again, with the failure still counted", stats.State, stats.ErrorCount)
+	}
+}

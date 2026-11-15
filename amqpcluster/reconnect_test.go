@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // fakeConnection stands in for a broker connection: it can be opened, report
@@ -40,6 +42,15 @@ func (ch *fakeChannel) IsClosed() bool { return ch.closed.Load() || ch.conn.IsCl
 
 func (ch *fakeChannel) Close() error {
 	ch.closed.Store(true)
+	return nil
+}
+
+// Publish fails the way amqp091 does on a channel the broker has closed, and
+// succeeds otherwise.
+func (ch *fakeChannel) Publish(string, string, bool, bool, amqp.Publishing) error {
+	if ch.IsClosed() {
+		return amqp.ErrClosed
+	}
 	return nil
 }
 

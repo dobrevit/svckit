@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -40,10 +41,15 @@ type Node struct {
 	// mutex, because the dial happens outside it.
 	connecting atomic.Bool
 
+	// windowStart is when the current error window began; the health check
+	// closes the window and starts a new one. Guarded by mutex.
+	windowStart time.Time
+
 	// Metrics
 	publishCount   int64
 	subscribeCount int64
-	errorCount     int64
+	errorCount     int64 // every error since the node was created
+	windowErrors   int64 // errors since windowStart; decides recovery
 }
 
 // ClusterConfig holds configuration for the RabbitMQ cluster adapter
@@ -54,6 +60,15 @@ type ClusterConfig struct {
 	RetryAttempts           int           // Max retry attempts for publishing
 	CircuitBreakerThreshold int           // Failures before marking node as failed
 	LoadBalanceStrategy     string        // "round_robin", "random", "hash"
+
+	// DegradedErrorRate is the error rate, in errors per minute, below which a
+	// degraded node is returned to service. A node is degraded by a failed
+	// publish; each health check measures the errors since the previous one,
+	// and a node whose connection and channel are open and whose rate over
+	// that window is below this value is healthy again. Zero means 1, so with
+	// the default 30-second interval a degraded node recovers after one
+	// health interval without errors.
+	DegradedErrorRate float64
 }
 
 // ClusterAdapter manages connections to multiple RabbitMQ nodes
@@ -71,6 +86,9 @@ type ClusterAdapter struct {
 
 	// dial opens a node's connection; nil means dialBroker. Tests replace it.
 	dial dialFunc
+
+	// now is the clock; nil means time.Now. Tests replace it.
+	now func() time.Time
 
 	// closed is set by Close, so that a reconnect that finishes afterwards
 	// does not install a connection nothing will ever close.
@@ -101,6 +119,9 @@ func NewClusterAdapter(config ClusterConfig) (*ClusterAdapter, error) {
 	if config.LoadBalanceStrategy == "" {
 		config.LoadBalanceStrategy = "round_robin"
 	}
+	if config.DegradedErrorRate <= 0 {
+		config.DegradedErrorRate = 1
+	}
 
 	adapter := &ClusterAdapter{
 		config:        config,
@@ -114,10 +135,11 @@ func NewClusterAdapter(config ClusterConfig) (*ClusterAdapter, error) {
 	// Initialize nodes
 	for i, nodeURL := range config.Nodes {
 		adapter.nodes[i] = &Node{
-			URL:       nodeURL,
-			Name:      fmt.Sprintf("node-%d", i),
-			state:     NodeFailed, // Start as failed, health check will update
-			lastCheck: time.Now(),
+			URL:         nodeURL,
+			Name:        fmt.Sprintf("node-%d", i),
+			state:       NodeFailed, // Start as failed, health check will update
+			lastCheck:   adapter.clock(),
+			windowStart: adapter.clock(),
 		}
 	}
 
@@ -182,7 +204,7 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	if err != nil {
 		node.state = NodeFailed
 		node.lastError = err
-		node.lastCheck = time.Now()
+		node.lastCheck = ca.clock()
 		node.mutex.Unlock()
 		atomic.AddInt64(&node.errorCount, 1)
 		return err
@@ -193,7 +215,11 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	node.subscribeCh = subscribeCh
 	node.state = NodeHealthy
 	node.lastError = nil
-	node.lastCheck = time.Now()
+	node.lastCheck = ca.clock()
+	// A new connection starts with a clean window: errors on the old one say
+	// nothing about it.
+	node.windowStart = node.lastCheck
+	atomic.StoreInt64(&node.windowErrors, 0)
 	node.mutex.Unlock()
 
 	// Closing a connection closes its channels too.
@@ -410,6 +436,7 @@ func (ca *ClusterAdapter) publishToNode(node *Node, exchange, routingKey string,
 
 	if err := ch.Publish(exchange, routingKey, mandatory, immediate, msg); err != nil {
 		atomic.AddInt64(&node.errorCount, 1)
+		atomic.AddInt64(&node.windowErrors, 1)
 		// Mark node as degraded if it fails
 		node.mutex.Lock()
 		if node.state == NodeHealthy {
@@ -591,41 +618,77 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 
-	// Skip if we checked recently
-	if time.Since(node.lastCheck) < 10*time.Second {
+	now := ca.clock()
+
+	// Skip a node checked within the last half interval: connectToNode records
+	// a check as well, and a node that has just connected needs no second look.
+	if now.Sub(node.lastCheck) < ca.config.HealthCheckInterval/2 {
 		return false
 	}
+	node.lastCheck = now
 
-	node.lastCheck = time.Now()
+	// Close the error window. The rate that decides recovery is over the time
+	// since the previous check; dividing by the time since lastCheck, after
+	// setting it to now, is what used to keep a degraded node degraded forever.
+	window := now.Sub(node.windowStart)
+	windowErrors := atomic.SwapInt64(&node.windowErrors, 0)
+	node.windowStart = now
 
-	// Test connection
 	if node.conn == nil || node.conn.IsClosed() {
 		return true
 	}
 
-	// Test channel health
-	if node.publishCh == nil {
-		logging.Warn("Node %s publish channel is nil, recreating", node.Name)
-		if ch, err := node.conn.Channel(); err != nil {
+	// A channel the broker closed (a publish to a missing exchange does that)
+	// leaves the connection open; recreate it rather than wait for the
+	// connection to drop.
+	if node.publishCh == nil || node.publishCh.IsClosed() {
+		logging.Warn("Node %s publish channel is closed, recreating", node.Name)
+		ch, err := node.conn.Channel()
+		if err != nil {
 			logging.Error("Failed to recreate publish channel for node %s: %v", node.Name, err)
 			node.state = NodeFailed
-		} else {
-			node.publishCh = ch
-			if node.state == NodeFailed {
-				node.state = NodeHealthy
-				logging.Info("Node %s recovered", node.Name)
-			}
+			node.lastError = err
+			return false
 		}
+		node.publishCh = ch
 	}
 
-	// Update state based on recent error rate
-	if node.state == NodeDegraded {
-		// Attempt to upgrade degraded nodes back to healthy
-		errorRate := float64(atomic.LoadInt64(&node.errorCount)) / float64(time.Since(node.lastCheck).Minutes())
-		if errorRate < 1.0 { // Less than 1 error per minute
+	switch node.state {
+	case NodeFailed:
+		node.state = NodeHealthy
+		logging.Info("Node %s recovered", node.Name)
+	case NodeDegraded:
+		if errorsPerMinute(windowErrors, window) < ca.degradedErrorRate() {
 			node.state = NodeHealthy
 			logging.Info("Node %s upgraded from degraded to healthy", node.Name)
 		}
 	}
 	return false
+}
+
+// errorsPerMinute is n errors over window as a rate. No errors is a rate of
+// zero however short the window; errors over no time at all are an infinite
+// rate, not a division by zero.
+func errorsPerMinute(n int64, window time.Duration) float64 {
+	if n == 0 {
+		return 0
+	}
+	if window <= 0 {
+		return math.Inf(1)
+	}
+	return float64(n) / window.Minutes()
+}
+
+func (ca *ClusterAdapter) degradedErrorRate() float64 {
+	if ca.config.DegradedErrorRate > 0 {
+		return ca.config.DegradedErrorRate
+	}
+	return 1
+}
+
+func (ca *ClusterAdapter) clock() time.Time {
+	if ca.now != nil {
+		return ca.now()
+	}
+	return time.Now()
 }
