@@ -36,6 +36,25 @@ type BaseEvent struct {
 	Source    string         `json:"source"`
 	UserID    string         `json:"user_id,omitempty"`
 	Data      map[string]any `json:"data"`
+
+	// Sealed, when set, holds Data encrypted (eventbus/seal), and Data is
+	// empty. A signature covers it.
+	Sealed *SealedPayload `json:"sealed,omitempty"`
+}
+
+// SealedPayload is an event's data encrypted under a per-message data key,
+// which is itself wrapped by a key-encryption key that only the key service
+// (or the static wrapper's holder) can use. eventbus/seal makes and opens
+// it; the fields are what a consumer needs to unwrap the data key and
+// decrypt.
+type SealedPayload struct {
+	Algorithm       string `json:"alg"`
+	KeyName         string `json:"key_name"`
+	KeyVersion      string `json:"key_version"`
+	ContractVersion string `json:"contract_version"`
+	WrappedKey      []byte `json:"wrapped_key"`
+	Nonce           []byte `json:"nonce"`
+	Ciphertext      []byte `json:"ciphertext"`
 }
 
 // NewEvent creates a new base event with a fresh random (version 4) UUID as

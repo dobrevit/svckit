@@ -275,6 +275,20 @@ func createCanonicalEventData(event *BaseEvent, signedAt, expiresAt time.Time) (
 		"type":       event.Type,
 		"user_id":    event.UserID,
 	}
+	// A sealed payload is covered when there is one, so a consumer can
+	// verify before it opens; an unsealed event's canonical bytes are what
+	// they always were, so existing signatures still verify.
+	if event.Sealed != nil {
+		canonicalData["sealed"] = map[string]any{
+			"alg":              event.Sealed.Algorithm,
+			"ciphertext":       base64.StdEncoding.EncodeToString(event.Sealed.Ciphertext),
+			"contract_version": event.Sealed.ContractVersion,
+			"key_name":         event.Sealed.KeyName,
+			"key_version":      event.Sealed.KeyVersion,
+			"nonce":            base64.StdEncoding.EncodeToString(event.Sealed.Nonce),
+			"wrapped_key":      base64.StdEncoding.EncodeToString(event.Sealed.WrappedKey),
+		}
+	}
 
 	// Convert to canonical JSON with sorted keys
 	canonical, err := marshalCanonicalJSON(canonicalData)

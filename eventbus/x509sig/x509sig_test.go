@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dobrevit/svckit/eventbus"
+	"github.com/dobrevit/svckit/eventbus/seal"
 )
 
 const prefix = "spiffe://test/service/"
@@ -236,4 +237,30 @@ func TestNewVerifierRequiresAnAllowList(t *testing.T) {
 	if _, err := NewVerifier(Config{Roots: ca.pool, URIPrefix: prefix, AllowAnyPublisher: true}); err != nil {
 		t.Errorf("AllowAnyPublisher was refused: %v", err)
 	}
+}
+
+// A certificate signature covers a sealed payload as an HMAC one does.
+func TestACertificateSignatureCoversTheSealedPayload(t *testing.T) {
+	ca := newCA(t)
+	kek := make([]byte, 32)
+	_, _ = rand.Read(kek)
+	wrapper, err := seal.NewStaticWrapper(kek, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := eventbus.NewEvent("order.created", "orders", map[string]any{"card": "4111 1111 1111 1111"})
+	if err := seal.NewSealer(wrapper, "orders", "order.v1").Seal(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+
+	signed, err := NewSigner(source(ca.valid(t, "orders")), 0).Sign(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := verifierFor(t, ca)
+	if err := v.Verify(context.Background(), signed); err != nil {
+		t.Fatalf("Verify of a sealed event: %v", err)
+	}
+	signed.Event.Sealed.WrappedKey[0] ^= 1
+	refused(t, v, signed, "a changed sealed payload")
 }

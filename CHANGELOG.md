@@ -46,6 +46,19 @@ releases.
   allow-list. RSA, Ed25519 and other curves are refused. Revocation is by
   short certificate lifetime, and the package documentation states the window
   that leaves. Standard library only. `SignedEvent` gains `Certificate`.
+- **Payloads can be sealed in an AES-256-GCM envelope under a wrapped
+  per-message key** (`eventbus/seal`). *Opt-in; an unsealed event is
+  unchanged on the wire.* A payload carrying personal data sat readable in
+  the broker's queues, its dead-letter queues and their backups. A
+  `seal.Sealer` encrypts `BaseEvent.Data` under a fresh data key per message,
+  with a random 96-bit nonce and additional data binding the event's id,
+  type and source, a contract version and the key's name and version, and
+  zeroes the plaintext key after use; `seal.Opener` reverses it.
+  `BaseEvent` gains `Sealed *SealedPayload`, and `Data` is empty while
+  sealed. Data keys come from a `seal.KeyWrapper`; `seal.StaticWrapper` wraps
+  them under a local key for tests and development. Signatures, HMAC and
+  x509 alike, now cover a sealed payload, so a consumer verifies before it
+  opens; an unsealed event's signed bytes are unchanged.
 
 ### Fixed
 
