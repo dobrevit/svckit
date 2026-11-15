@@ -3,7 +3,7 @@ module github.com/dobrevit/svckit/ginx
 go 1.26.10
 
 require (
-	github.com/dobrevit/svckit v0.1.6
+	github.com/dobrevit/svckit v0.1.7
 	github.com/gin-gonic/gin v1.12.0
 )
 

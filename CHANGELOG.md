@@ -8,6 +8,13 @@ releases.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-15
+
+Backlog items SK-23 to SK-25: the transactional outbox (writer and relay)
+and the inbox. All new packages; nothing existing changes. `testkit`,
+`chix`, `ginx` and `vaultx` are released as v0.1.7 alongside, each requiring
+svckit v0.1.7.
+
 ### Added
 
 - **An outbox writer stores a message in the caller's transaction**
@@ -632,7 +639,8 @@ It remains the record of what the toolkit contains.
   without this module depending on OpenTelemetry.
 - The main module depends on no web framework and no ORM.
 
-[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/dobrevit/svckit/releases/tag/v0.1.7
 [0.1.6]: https://github.com/dobrevit/svckit/releases/tag/v0.1.6
 [0.1.5]: https://github.com/dobrevit/svckit/releases/tag/v0.1.5
 [0.1.4]: https://github.com/dobrevit/svckit/releases/tag/v0.1.4

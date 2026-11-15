@@ -3,7 +3,7 @@ module github.com/dobrevit/svckit/chix
 go 1.26.0
 
 require (
-	github.com/dobrevit/svckit v0.1.6
+	github.com/dobrevit/svckit v0.1.7
 	github.com/go-chi/chi/v5 v5.5.0
 )
 
