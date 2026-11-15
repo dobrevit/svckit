@@ -24,6 +24,23 @@ releases.
   `outbox.EventMessage` builds a message from an event as the publishers
   would send it. The table name is configurable; consumers own the
   migration, from `outbox.Schema(table)` or `outbox/schema.sql`.
+- **An outbox relay publishes stored messages with confirms, backoff,
+  metrics and a retention purge.** *New.* `outbox.NewRelay(db, publisher,
+  config)` claims pending rows in creation order with `FOR UPDATE SKIP
+  LOCKED` (so several relays share a table without publishing a row twice),
+  publishes each as stored through a confirming publisher
+  (`amqpcluster.ClusterAdapter` with `PublisherConfirms`), and sets
+  `published_at` only after the broker's ack, in the claiming transaction. A
+  return, nack, timeout or lost channel leaves the row pending with
+  `attempts` + 1, an exponential `next_attempt_at` and a short `last_error`.
+  A message with `ExpiresAt` is published with its remaining time as the AMQP
+  expiration; one already expired is never published, but marked expired
+  and passed to `OnExpired`. `Retention` purges old published and expired
+  rows, never pending ones. Prometheus metrics: `svckit_outbox_relayed_total`
+  by outcome, `svckit_outbox_backlog`, and
+  `svckit_outbox_oldest_unpublished_age_seconds`. `Run(ctx)` returns within
+  `StopTimeout` of cancellation, committing what was published. Logs carry
+  the id and routing key, never the body.
 
 ## [0.1.6] - 2026-11-15
 
