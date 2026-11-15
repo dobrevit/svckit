@@ -73,6 +73,12 @@ releases.
   now interfaces, so that one `WithTLS` serves both; the existing options are
   used as before. `compose.yaml` gains `rabbitmq-tls-test` (profile `tls`,
   port 5675), which the integration tests start with a CA they make.
+- **`testkit/containers` starts a Vault.** *Opt-in, testkit module only.*
+  `TestContainerConfig.Vault` also starts Vault in dev mode on a pinned image
+  (`containers.DefaultVaultImage`, `hashicorp/vault:1.21.4`), with
+  `GetVaultAddress()`, the root token `containers.VaultRootToken`,
+  `EnableTransit`, `EnablePKI` (a root and an intermediate ECDSA CA, the
+  intermediate signed by the root) and `VaultRequest` for anything else.
 
 ### Fixed
 

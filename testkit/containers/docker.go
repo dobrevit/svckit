@@ -19,6 +19,7 @@ type TestContainers struct {
 	PostgresContainer testcontainers.Container
 	RedisContainer    testcontainers.Container
 	RabbitMQContainer testcontainers.Container
+	VaultContainer    testcontainers.Container // with TestContainerConfig.Vault
 	ctx               context.Context
 }
 
@@ -398,6 +399,7 @@ func (tc *TestContainers) Close() error {
 		{"postgres", tc.PostgresContainer},
 		{"redis", tc.RedisContainer},
 		{"rabbitmq", tc.RabbitMQContainer},
+		{"vault", tc.VaultContainer},
 	}
 
 	for _, c := range containers {
@@ -421,6 +423,12 @@ type TestContainerConfig struct {
 	RedisImage    string
 	RabbitMQImage string
 	StartTimeout  time.Duration
+
+	// Vault also starts a Vault in dev mode (in memory, unsealed, root token
+	// VaultRootToken), for code that uses Transit or PKI; see EnableTransit,
+	// EnablePKI and VaultRequest. VaultImage defaults to DefaultVaultImage.
+	Vault      bool
+	VaultImage string
 }
 
 // DefaultTestContainerConfig returns default configuration for test containers
@@ -430,6 +438,7 @@ func DefaultTestContainerConfig() *TestContainerConfig {
 		RedisImage:    "redis:7-alpine",
 		RabbitMQImage: "rabbitmq:3-management-alpine",
 		StartTimeout:  60 * time.Second,
+		VaultImage:    DefaultVaultImage,
 	}
 }
 
@@ -451,6 +460,13 @@ func NewTestContainersWithConfig(ctx context.Context, config *TestContainerConfi
 
 	if err := containers.startRabbitMQ(config); err != nil {
 		return nil, fmt.Errorf("failed to start rabbitmq container: %w", err)
+	}
+
+	if config.Vault {
+		if err := containers.startVault(config); err != nil {
+			_ = containers.Close()
+			return nil, err
+		}
 	}
 
 	return containers, nil
@@ -476,6 +492,9 @@ func (c *TestContainerConfig) withDefaults() *TestContainerConfig {
 	}
 	if filled.StartTimeout == 0 {
 		filled.StartTimeout = defaults.StartTimeout
+	}
+	if filled.VaultImage == "" {
+		filled.VaultImage = defaults.VaultImage
 	}
 	return &filled
 }
