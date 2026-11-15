@@ -31,6 +31,24 @@ releases.
   The health check now skips a node checked within half an interval rather
   than within a fixed ten seconds, so intervals below twenty seconds take
   effect. *Fix; one new optional field.*
+- **`amqpcluster` consumers survive a reconnect, and prefetch is applied.** A
+  node's consumers ended with its connection and were never started again, and
+  a node that was down when `Subscribe` was called was never consumed from.
+  The adapter now remembers its subscriptions and the exchanges, queues and
+  bindings it declared, and after a node connects or reconnects (or its
+  subscribe channel is recreated after a channel error) replays the
+  declarations and resumes consuming into the same delivery channel.
+  `SubscriptionOptions.PrefetchCount` was accepted but never applied, so a
+  consumer received every ready message at once; it is now set with `Qos`
+  before each consume. *Fix, with two visible effects:*
+  `ClusterSubscriber.Subscribe`, whose default is `PrefetchCount: 1`, now
+  holds one unacknowledged message per node at a time (pass
+  `SubscribeWithOptions` with `PrefetchCount: 0` for the old unbounded
+  delivery); and the channel `ClusterAdapter.Subscribe` returns is now closed
+  by `Close`, so a `range` over it ends. `ClusterAdapter.Subscribe` itself
+  still sets no prefetch.
+- `compose.yaml` gains `rabbitmq-test-2` (port 5674, `RABBITMQ_URL_2`), an
+  independent second broker for the multi-node integration tests.
 
 ## [0.1.4] - 2026-11-15
 

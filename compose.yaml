@@ -10,6 +10,7 @@
 #   DB_HOST=localhost DB_PORT=5433 DB_USER=test_user
 #   DB_PASSWORD=test_password DB_NAME=test_db
 #   RABBITMQ_URL=amqp://test_user:test_password@localhost:5673/
+#   RABBITMQ_URL_2=amqp://test_user:test_password@localhost:5674/
 #   REDIS_TEST_URL=redis://localhost:6379
 #
 # The credentials are deliberately throwaway: this stack is for tests on a
@@ -46,6 +47,21 @@ services:
       RABBITMQ_DEFAULT_PASS: test_password
     ports:
       - "5673:5672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # A second, independent RabbitMQ (not clustered with the first), for the
+  # amqpcluster tests that need a node to be down while another is up.
+  rabbitmq-test-2:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: test_user
+      RABBITMQ_DEFAULT_PASS: test_password
+    ports:
+      - "5674:5672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s

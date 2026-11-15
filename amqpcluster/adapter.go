@@ -36,6 +36,12 @@ type Node struct {
 	lastCheck   time.Time
 	mutex       sync.RWMutex
 
+	// consumeMu serialises starting consumers on this node, and guards
+	// consumers: the channel each subscription is consuming on, so that a
+	// subscription is never started twice on one channel.
+	consumeMu sync.Mutex
+	consumers map[*subscription]amqpChannel
+
 	// connecting is set while a dial to this node is in flight, so that two
 	// health checks never dial the same node at once. It is not guarded by
 	// mutex, because the dial happens outside it.
@@ -89,6 +95,19 @@ type ClusterAdapter struct {
 
 	// now is the clock; nil means time.Now. Tests replace it.
 	now func() time.Time
+
+	// registry holds the subscriptions and declarations restored on a node
+	// after it connects.
+	registry registry
+
+	// forwarders counts the goroutines moving deliveries from a node to a
+	// subscription; forwardersMu orders adding one against Close's wait.
+	forwarders   sync.WaitGroup
+	forwardersMu sync.Mutex
+
+	stop      chan struct{} // closed by Close; see stopping
+	stopOnce  sync.Once
+	closeOnce sync.Once
 
 	// closed is set by Close, so that a reconnect that finishes afterwards
 	// does not install a connection nothing will ever close.
@@ -228,6 +247,8 @@ func (ca *ClusterAdapter) connectToNode(node *Node) error {
 	}
 
 	logging.Info("Successfully connected to RabbitMQ node: %s", node.Name)
+
+	ca.restoreNode(node)
 	return nil
 }
 
@@ -330,6 +351,13 @@ func (ca *ClusterAdapter) DeclareExchange(name, kind string, durable, autoDelete
 	if successCount == 0 {
 		return fmt.Errorf("failed to declare exchange on any node: %w", lastErr)
 	}
+	ca.registry.remember(declaration{
+		key:         "exchange " + name,
+		onPublishCh: true,
+		apply: func(ch amqpChannel) error {
+			return ch.ExchangeDeclare(name, kind, durable, autoDelete, internal, noWait, args)
+		},
+	})
 
 	logging.Info("Exchange %s declared on %d/%d nodes", name, successCount, len(healthy))
 	return nil
@@ -363,6 +391,13 @@ func (ca *ClusterAdapter) DeclareQueue(name string, durable, autoDelete, exclusi
 	if successCount == 0 {
 		return fmt.Errorf("failed to declare queue on any node: %w", lastErr)
 	}
+	ca.registry.remember(declaration{
+		key: "queue " + name,
+		apply: func(ch amqpChannel) error {
+			_, err := ch.QueueDeclare(name, durable, autoDelete, exclusive, noWait, args)
+			return err
+		},
+	})
 
 	logging.Info("Queue %s declared on %d/%d nodes", name, successCount, len(healthy))
 	return nil
@@ -396,6 +431,12 @@ func (ca *ClusterAdapter) BindQueue(queueName, routingKey, exchangeName string, 
 	if successCount == 0 {
 		return fmt.Errorf("failed to bind queue on any node: %w", lastErr)
 	}
+	ca.registry.remember(declaration{
+		key: fmt.Sprintf("binding %s to %s with %q", queueName, exchangeName, routingKey),
+		apply: func(ch amqpChannel) error {
+			return ch.QueueBind(queueName, routingKey, exchangeName, noWait, args)
+		},
+	})
 
 	logging.Info("Queue %s bound to exchange %s on %d/%d nodes", queueName, exchangeName, successCount, len(healthy))
 	return nil
@@ -450,51 +491,21 @@ func (ca *ClusterAdapter) publishToNode(node *Node, exchange, routingKey string,
 	return nil
 }
 
-// Subscribe consumes messages from all healthy nodes
+// Subscribe consumes messages from a queue on all healthy nodes, and keeps
+// consuming: a node that reconnects, or that was down when Subscribe was
+// called and connects later, starts consuming again into the same channel.
+// The channel is closed by Close. No prefetch limit is set; ClusterSubscriber
+// applies SubscriptionOptions.PrefetchCount.
 func (ca *ClusterAdapter) Subscribe(queueName, consumerTag string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
-	healthy := ca.getHealthyNodes()
-	if len(healthy) == 0 {
-		return nil, errors.New("no healthy nodes available for subscription")
-	}
-
-	// Create a multiplexed channel that combines messages from all nodes
-	multiplexed := make(chan amqp.Delivery, 100) // Buffer for better performance
-
-	var successCount int
-	for i, node := range healthy {
-		node.mutex.RLock()
-		ch := node.subscribeCh
-		node.mutex.RUnlock()
-
-		if ch != nil {
-			// Create unique consumer tag per node
-			nodeConsumerTag := fmt.Sprintf("%s-node-%d", consumerTag, i)
-
-			msgs, err := ch.Consume(queueName, nodeConsumerTag, autoAck, exclusive, noLocal, noWait, args)
-			if err != nil {
-				logging.Error("Failed to consume from node %s: %v", node.Name, err)
-				continue
-			}
-
-			// Forward messages from this node to the multiplexed channel
-			go func(node *Node, msgs <-chan amqp.Delivery) {
-				for msg := range msgs {
-					atomic.AddInt64(&node.subscribeCount, 1)
-					multiplexed <- msg
-				}
-			}(node, msgs)
-
-			successCount++
-		}
-	}
-
-	if successCount == 0 {
-		close(multiplexed)
-		return nil, errors.New("failed to subscribe to any healthy node")
-	}
-
-	logging.Info("Subscribed to queue %s on %d/%d nodes", queueName, successCount, len(healthy))
-	return multiplexed, nil
+	return ca.subscribe(&subscription{
+		queue:       queueName,
+		consumerTag: consumerTag,
+		autoAck:     autoAck,
+		exclusive:   exclusive,
+		noLocal:     noLocal,
+		noWait:      noWait,
+		args:        args,
+	})
 }
 
 // GetNodeStats returns statistics for all nodes
@@ -536,10 +547,16 @@ type NodeStats struct {
 // rather than discarded, which is what this method used to do.
 func (ca *ClusterAdapter) Close() error {
 	ca.closed.Store(true)
+	ca.closeOnce.Do(func() {
+		ca.stopping() // makes ca.stop if nothing has yet
+		close(ca.stop)
+	})
 
 	// Stop background tasks using tomb manager. This waits for any health
 	// check, and so any reconnect, in flight.
-	ca.tombManager.Shutdown()
+	if ca.tombManager != nil {
+		ca.tombManager.Shutdown()
+	}
 
 	var errs []error
 	for _, node := range ca.nodes {
@@ -560,6 +577,18 @@ func (ca *ClusterAdapter) Close() error {
 			}
 		}
 		node.mutex.Unlock()
+	}
+
+	// Closing the connections closed every consumer's deliveries, and
+	// stopping released any forwarder blocked on a full subscription. Once
+	// they have all returned nothing sends on a subscription channel, so it
+	// is safe to close them, which ends a range over one.
+	ca.forwardersMu.Lock()
+	ca.forwardersMu.Unlock() //nolint:staticcheck // orders Close's Wait after any forwarder added before closed was set
+	ca.forwarders.Wait()
+	_, subscriptions := ca.registry.snapshot()
+	for _, s := range subscriptions {
+		close(s.out)
 	}
 
 	logging.Info("RabbitMQ cluster adapter closed")
@@ -604,17 +633,29 @@ func (ca *ClusterAdapter) performHealthChecks() {
 // node.mutex only while it inspects and updates the node; a reconnect happens
 // after the lock is released (see connectToNode).
 func (ca *ClusterAdapter) checkNodeHealth(node *Node) {
-	if ca.inspectNode(node) {
+	switch ca.inspectNode(node) {
+	case reconnectNode:
 		logging.Info("Node %s connection is closed, attempting reconnection", node.Name)
 		if err := ca.connectToNode(node); err != nil && !errors.Is(err, errConnectInProgress) {
 			logging.Error("Failed to reconnect to node %s: %v", node.Name, err)
 		}
+	case restoreConsumers:
+		ca.restoreNode(node)
 	}
 }
 
+// healthAction is what a health check has to do after it releases the lock.
+type healthAction int
+
+const (
+	nothingToDo healthAction = iota
+	reconnectNode
+	restoreConsumers // the subscribe channel was recreated, and its consumers with it
+)
+
 // inspectNode does the part of a health check that needs the node lock, and
-// reports whether the node's connection is gone and has to be re-established.
-func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
+// reports what remains to be done without it.
+func (ca *ClusterAdapter) inspectNode(node *Node) (action healthAction) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 
@@ -623,7 +664,7 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
 	// Skip a node checked within the last half interval: connectToNode records
 	// a check as well, and a node that has just connected needs no second look.
 	if now.Sub(node.lastCheck) < ca.config.HealthCheckInterval/2 {
-		return false
+		return nothingToDo
 	}
 	node.lastCheck = now
 
@@ -635,7 +676,7 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
 	node.windowStart = now
 
 	if node.conn == nil || node.conn.IsClosed() {
-		return true
+		return reconnectNode
 	}
 
 	// A channel the broker closed (a publish to a missing exchange does that)
@@ -648,9 +689,23 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
 			logging.Error("Failed to recreate publish channel for node %s: %v", node.Name, err)
 			node.state = NodeFailed
 			node.lastError = err
-			return false
+			return nothingToDo
 		}
 		node.publishCh = ch
+	}
+
+	// The same for the subscribe channel, whose consumers closed with it.
+	if node.subscribeCh == nil || node.subscribeCh.IsClosed() {
+		logging.Warn("Node %s subscribe channel is closed, recreating", node.Name)
+		ch, err := node.conn.Channel()
+		if err != nil {
+			logging.Error("Failed to recreate subscribe channel for node %s: %v", node.Name, err)
+			node.state = NodeFailed
+			node.lastError = err
+			return nothingToDo
+		}
+		node.subscribeCh = ch
+		action = restoreConsumers
 	}
 
 	switch node.state {
@@ -663,7 +718,7 @@ func (ca *ClusterAdapter) inspectNode(node *Node) (reconnect bool) {
 			logging.Info("Node %s upgraded from degraded to healthy", node.Name)
 		}
 	}
-	return false
+	return action
 }
 
 // errorsPerMinute is n errors over window as a rate. No errors is a rate of

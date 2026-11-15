@@ -78,6 +78,10 @@ type SubscriptionOptions struct {
 	Exclusive     bool
 	Durable       bool
 	AutoDelete    bool
+
+	// PrefetchCount is how many unacknowledged messages the broker sends
+	// each consumer (one per node) before it waits for an ack. Zero sets no
+	// limit, so the broker sends every ready message at once; Subscribe uses 1.
 	PrefetchCount int
 	TTL           time.Duration // Message TTL
 }
@@ -89,16 +93,15 @@ func (cs *ClusterSubscriber) SubscribeWithOptions(queueName, routingPattern stri
 		return fmt.Errorf("failed to setup queue infrastructure: %w", err)
 	}
 
-	// Start consuming from all healthy nodes
-	msgs, err := cs.cluster.Subscribe(
-		queueName,
-		fmt.Sprintf("%s-%s", cs.serviceName, queueName),
-		opts.AutoAck,
-		opts.Exclusive,
-		false, // no-local
-		false, // no-wait
-		nil,   // args
-	)
+	// Start consuming from all healthy nodes, and from any node that
+	// connects or reconnects later.
+	msgs, err := cs.cluster.subscribe(&subscription{
+		queue:       queueName,
+		consumerTag: fmt.Sprintf("%s-%s", cs.serviceName, queueName),
+		autoAck:     opts.AutoAck,
+		exclusive:   opts.Exclusive,
+		prefetch:    opts.PrefetchCount,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to start cluster subscription: %w", err)
 	}

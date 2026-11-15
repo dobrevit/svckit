@@ -2,93 +2,9 @@ package amqpcluster
 
 import (
 	"errors"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	amqp "github.com/rabbitmq/amqp091-go"
 )
-
-// fakeConnection stands in for a broker connection: it can be opened, report
-// itself closed, and hand out channels that close with it.
-type fakeConnection struct {
-	closed atomic.Bool
-}
-
-func (c *fakeConnection) Channel() (amqpChannel, error) {
-	if c.closed.Load() {
-		return nil, errors.New("connection closed")
-	}
-	return &fakeChannel{conn: c}, nil
-}
-
-func (c *fakeConnection) IsClosed() bool { return c.closed.Load() }
-
-func (c *fakeConnection) Close() error {
-	c.closed.Store(true)
-	return nil
-}
-
-// fakeChannel implements only what the health check and Close use; any other
-// call panics on the nil embedded interface, which a test would notice.
-type fakeChannel struct {
-	amqpChannel
-	conn   *fakeConnection
-	closed atomic.Bool
-}
-
-func (ch *fakeChannel) IsClosed() bool { return ch.closed.Load() || ch.conn.IsClosed() }
-
-func (ch *fakeChannel) Close() error {
-	ch.closed.Store(true)
-	return nil
-}
-
-// Publish fails the way amqp091 does on a channel the broker has closed, and
-// succeeds otherwise.
-func (ch *fakeChannel) Publish(string, string, bool, bool, amqp.Publishing) error {
-	if ch.IsClosed() {
-		return amqp.ErrClosed
-	}
-	return nil
-}
-
-// fakeDialer counts dials and, when gate is set, holds each dial until the
-// gate is closed, so a test can look at the adapter while a dial is slow.
-type fakeDialer struct {
-	gate    chan struct{}
-	entered chan struct{} // receives once per dial, when it starts
-	err     error
-
-	mu    sync.Mutex
-	conns []*fakeConnection
-}
-
-func newFakeDialer() *fakeDialer {
-	return &fakeDialer{entered: make(chan struct{}, 16)}
-}
-
-func (d *fakeDialer) dial(string) (amqpConnection, error) {
-	d.entered <- struct{}{}
-	if d.gate != nil {
-		<-d.gate
-	}
-	if d.err != nil {
-		return nil, d.err
-	}
-	conn := &fakeConnection{}
-	d.mu.Lock()
-	d.conns = append(d.conns, conn)
-	d.mu.Unlock()
-	return conn, nil
-}
-
-func (d *fakeDialer) dials() []*fakeConnection {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return append([]*fakeConnection(nil), d.conns...)
-}
 
 // nodeWithClosedConnection is a node whose broker connection has dropped, as
 // the health check finds it after a broker restart or a network blip, and
