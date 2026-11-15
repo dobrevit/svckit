@@ -8,8 +8,11 @@ releases.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-15
+
 The messaging, database and shutdown fixes and additions of backlog items
-SK-1 to SK-15. Every item without a *Default change* label is a fix or is
+SK-1 to SK-15. `testkit`, `chix` and `ginx` are released as v0.1.5 alongside,
+each requiring svckit v0.1.5. Every item without a *Default change* label is a fix or is
 opt-in; the default changes below need a look before upgrading, since a patch
 version does not announce them.
 
@@ -468,7 +471,8 @@ It remains the record of what the toolkit contains.
   without this module depending on OpenTelemetry.
 - The main module depends on no web framework and no ORM.
 
-[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/dobrevit/svckit/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/dobrevit/svckit/releases/tag/v0.1.5
 [0.1.4]: https://github.com/dobrevit/svckit/releases/tag/v0.1.4
 [0.1.3]: https://github.com/dobrevit/svckit/releases/tag/v0.1.3
 [0.1.2]: https://github.com/dobrevit/svckit/releases/tag/v0.1.2
