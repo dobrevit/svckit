@@ -32,3 +32,9 @@ func TestNewRequiresAnAddressAndOneCredential(t *testing.T) {
 		}
 	}
 }
+
+func TestNewCertSourceRequiresARole(t *testing.T) {
+	if _, err := NewCertSource(context.Background(), &Client{}, CertSourceConfig{CommonName: "orders"}); err == nil {
+		t.Error("NewCertSource without a role succeeded")
+	}
+}

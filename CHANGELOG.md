@@ -92,6 +92,16 @@ releases.
   Vault's health for readiness. A module of its own, so the core never
   depends on Vault; plain `net/http`, like `secrets.VaultStore`, rather than
   the official client and its dependencies.
+- **`vaultx` issues and renews short-lived certificates from Vault PKI.**
+  `vaultx.CertSource` makes an ECDSA P-256 key in the process and sends
+  Vault only a certificate request (`<mount>/sign/<role>`), so the private key
+  never leaves the process; it renews at a fraction of the certificate's
+  lifetime (default two thirds) with a fresh key each time, retries a failed
+  renewal with backoff, and reports one through `CertSource.HealthChecker`.
+  `GetCertificate` / `GetClientCertificate` feed a `tls.Config` (a reconnect
+  presents the renewed certificate), `Certificate` is an
+  `x509sig.CertificateSource`, and `IssuingChain` gives verifiers the
+  intermediates.
 
 ### Fixed
 
