@@ -9,7 +9,7 @@ import (
 
 func TestWithTransientSetsTheDeliveryMode(t *testing.T) {
 	p := &Publisher{deliveryMode: amqp.Persistent}
-	WithTransient()(p)
+	WithTransient().applyPublisher(p)
 	if p.deliveryMode != amqp.Transient {
 		t.Errorf("delivery mode = %d, want transient (%d)", p.deliveryMode, amqp.Transient)
 	}

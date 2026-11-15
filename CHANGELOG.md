@@ -59,6 +59,20 @@ releases.
   them under a local key for tests and development. Signatures, HMAC and
   x509 alike, now cover a sealed payload, so a consumer verifies before it
   opens; an unsealed event's signed bytes are unchanged.
+- **Publishers and subscribers connect over TLS with certificate (EXTERNAL)
+  authentication.** *Opt-in.* Every connection was `amqp.Dial(url)`: an
+  `amqps://` URL got the default TLS config, with no client certificate and
+  no EXTERNAL authentication, so certificate-based broker access was
+  impossible. `eventbus.WithTLS(config, external)` (for publishers and
+  subscribers alike) and `amqpcluster.ClusterConfig.TLS` / `ExternalAuth`
+  (also on `amqpcluster.Config`, for `NewClusterSubscriberWithConfig`) connect
+  with a `*tls.Config` and, with external, authenticate as the user the
+  certificate names. The config is used for every connection, so a
+  `GetClientCertificate` that returns a renewed certificate is presented from
+  the next reconnect on. `eventbus.PublisherOption` and `SubscriberOption` are
+  now interfaces, so that one `WithTLS` serves both; the existing options are
+  used as before. `compose.yaml` gains `rabbitmq-tls-test` (profile `tls`,
+  port 5675), which the integration tests start with a CA they make.
 
 ### Fixed
 

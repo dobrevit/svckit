@@ -1,6 +1,9 @@
 package amqpcluster
 
 import (
+	"crypto/tls"
+	"time"
+
 	"github.com/dobrevit/svckit/internal/amqpconfirm"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -48,9 +51,34 @@ func (c brokerConnection) Channel() (amqpChannel, error) {
 }
 
 func dialBroker(url string) (amqpConnection, error) {
-	conn, err := amqp.Dial(url)
-	if err != nil {
-		return nil, err
+	return dialerFor(nil, false)(url)
+}
+
+// dialerFor dials with amqp.Dial, or, with TLS settings, amqp.DialConfig
+// with amqp.Dial's heartbeat and locale, the TLS config, and EXTERNAL
+// authentication when asked for. The TLS config is used for every
+// (re)connect, so a GetClientCertificate that returns a renewed
+// certificate is used from the next connection on.
+func dialerFor(tlsConfig *tls.Config, external bool) dialFunc {
+	return func(url string) (amqpConnection, error) {
+		var conn *amqp.Connection
+		var err error
+		if tlsConfig == nil && !external {
+			conn, err = amqp.Dial(url)
+		} else {
+			config := amqp.Config{
+				Heartbeat:       10 * time.Second,
+				Locale:          "en_US",
+				TLSClientConfig: tlsConfig,
+			}
+			if external {
+				config.SASL = []amqp.Authentication{&amqp.ExternalAuth{}}
+			}
+			conn, err = amqp.DialConfig(url, config)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return brokerConnection{conn}, nil
 	}
-	return brokerConnection{conn}, nil
 }

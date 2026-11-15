@@ -1,6 +1,7 @@
 package amqpcluster
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,11 @@ type Config struct {
 	// Signing configuration
 	EventSigningKey string
 	SigningRequired bool
+
+	// TLS and ExternalAuth are passed to the adapter; see
+	// ClusterConfig.TLS. LoadConfigFromEnv does not set them.
+	TLS          *tls.Config
+	ExternalAuth bool
 }
 
 // LoadConfigFromEnv loads cluster configuration from environment variables

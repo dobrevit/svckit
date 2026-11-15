@@ -99,6 +99,8 @@ func NewClusterSubscriberWithConfig(config Config, opts ...SubscriberOption) (*C
 		HealthCheckInterval: config.HealthCheckInterval,
 		RetryAttempts:       config.RetryAttempts,
 		LoadBalanceStrategy: config.LoadBalanceStrategy,
+		TLS:                 config.TLS,
+		ExternalAuth:        config.ExternalAuth,
 	}, signingConfig, config.SigningRequired, opts)
 }
 

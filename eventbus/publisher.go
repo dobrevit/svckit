@@ -35,6 +35,8 @@ type Publisher struct {
 	confirmTimeout time.Duration
 	confirms       bool
 	confirmer      *amqpconfirm.Publisher // set when confirms is
+
+	dialing dialSettings
 }
 
 // The outcomes of a publish on a publisher with confirms (WithConfirms). They
@@ -59,8 +61,16 @@ var (
 // reply code and text.
 type ReturnedError = amqpconfirm.ReturnedError
 
-// PublisherOption adjusts a Publisher when it is created.
-type PublisherOption func(*Publisher)
+// PublisherOption adjusts a Publisher when it is created. WithTLS returns a
+// ConnectionOption, which is a PublisherOption and a SubscriberOption both.
+type PublisherOption interface {
+	applyPublisher(*Publisher)
+}
+
+// publisherOption adapts a function to PublisherOption.
+type publisherOption func(*Publisher)
+
+func (f publisherOption) applyPublisher(p *Publisher) { f(p) }
 
 // WithTransient publishes messages as transient (delivery mode 1) instead of
 // persistent: they cost no disk write, and a broker restart loses them even
@@ -69,17 +79,17 @@ type PublisherOption func(*Publisher)
 // messages is almost never what was meant; use this for messages that are
 // worthless after a restart, such as cache invalidations.
 func WithTransient() PublisherOption {
-	return func(p *Publisher) { p.deliveryMode = amqp.Transient }
+	return publisherOption(func(p *Publisher) { p.deliveryMode = amqp.Transient })
 }
 
 // WithSigner signs every published event with signer instead of the HMAC
 // scheme the signing config would give, such as a certificate signer.
 func WithSigner(signer Signer) PublisherOption {
-	return func(p *Publisher) {
+	return publisherOption(func(p *Publisher) {
 		if signer != nil {
 			p.signer = signer
 		}
-	}
+	})
 }
 
 // WithConfirms makes Publish return only once the broker has confirmed the
@@ -90,10 +100,10 @@ func WithSigner(signer Signer) PublisherOption {
 // ErrConfirmTimeout (zero means five seconds), and a cancelled ctx returns
 // ctx.Err(). Each publish waits for one round trip to the broker.
 func WithConfirms(timeout time.Duration) PublisherOption {
-	return func(p *Publisher) {
+	return publisherOption(func(p *Publisher) {
 		p.confirms = true
 		p.confirmTimeout = timeout
-	}
+	})
 }
 
 // NewPublisher creates a new event publisher
@@ -109,13 +119,26 @@ func NewPublisherWithService(rabbitmqURL, serviceName string, opts ...PublisherO
 // NewPublisherWithSigning creates a new event publisher with optional message
 // signing. Messages are persistent unless WithTransient is given.
 func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *SignatureConfig, requireSigning bool, opts ...PublisherOption) (*Publisher, error) {
-	conn, err := amqp.Dial(rabbitmqURL)
+	publisher := &Publisher{
+		serviceName:    serviceName,
+		requireSigning: requireSigning,
+		deliveryMode:   amqp.Persistent,
+	}
+	if signingConfig != nil || requireSigning {
+		publisher.signer = NewHMAC(signingConfig)
+	}
+	for _, opt := range opts {
+		opt.applyPublisher(publisher)
+	}
+
+	conn, err := publisher.dialing.dial(rabbitmqURL)
 	if err != nil {
 		return nil, err
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 
@@ -130,22 +153,12 @@ func NewPublisherWithSigning(rabbitmqURL, serviceName string, signingConfig *Sig
 		nil,             // arguments
 	)
 	if err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 
-	publisher := &Publisher{
-		conn:           conn,
-		channel:        ch,
-		serviceName:    serviceName,
-		requireSigning: requireSigning,
-		deliveryMode:   amqp.Persistent,
-	}
-	if signingConfig != nil || requireSigning {
-		publisher.signer = NewHMAC(signingConfig)
-	}
-	for _, opt := range opts {
-		opt(publisher)
-	}
+	publisher.conn = conn
+	publisher.channel = ch
 	if publisher.confirms {
 		confirmer, err := amqpconfirm.New(amqpconfirm.AMQPChannel{Channel: ch}, publisher.confirmTimeout)
 		if err != nil {
@@ -315,6 +328,8 @@ type Subscriber struct {
 
 	consumersMu sync.Mutex
 	consumers   []string // consumer tags, for Close to cancel
+
+	dialing dialSettings
 }
 
 // DefaultCloseTimeout is how long Close waits for running handlers before
@@ -325,14 +340,22 @@ const DefaultCloseTimeout = 10 * time.Second
 // SubscribeOptions.HandlerTimeout says otherwise.
 const DefaultHandlerTimeout = 30 * time.Second
 
-// SubscriberOption adjusts a Subscriber when it is created.
-type SubscriberOption func(*Subscriber)
+// SubscriberOption adjusts a Subscriber when it is created. WithTLS returns
+// a ConnectionOption, which is a PublisherOption and a SubscriberOption both.
+type SubscriberOption interface {
+	applySubscriber(*Subscriber)
+}
+
+// subscriberOption adapts a function to SubscriberOption.
+type subscriberOption func(*Subscriber)
+
+func (f subscriberOption) applySubscriber(s *Subscriber) { f(s) }
 
 // WithCloseTimeout sets how long Close waits for handlers still running
 // before it cancels their context (default DefaultCloseTimeout). A handler
 // cancelled this way has its message requeued.
 func WithCloseTimeout(d time.Duration) SubscriberOption {
-	return func(s *Subscriber) { s.closeTimeout = d }
+	return subscriberOption(func(s *Subscriber) { s.closeTimeout = d })
 }
 
 // WithVerifier verifies signed events with verifier instead of the HMAC
@@ -340,11 +363,11 @@ func WithCloseTimeout(d time.Duration) SubscriberOption {
 // subscriber with a verifier rejects unsigned messages (see
 // SubscribeOptions.AllowUnsigned).
 func WithVerifier(verifier Verifier) SubscriberOption {
-	return func(s *Subscriber) {
+	return subscriberOption(func(s *Subscriber) {
 		if verifier != nil {
 			s.verifier = verifier
 		}
-	}
+	})
 }
 
 // RetryPolicy retries a message whose handler failed with a retryable error
@@ -364,19 +387,7 @@ func NewSubscriberWithService(rabbitmqURL, serviceName string, opts ...Subscribe
 
 // NewSubscriberWithSigning creates a new event subscriber with optional signature verification
 func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *SignatureConfig, requireSigning bool, opts ...SubscriberOption) (*Subscriber, error) {
-	conn, err := amqp.Dial(rabbitmqURL)
-	if err != nil {
-		return nil, err
-	}
-
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-
 	subscriber := &Subscriber{
-		conn:           conn,
-		channel:        ch,
 		serviceName:    serviceName,
 		requireSigning: requireSigning,
 		handlers:       inflight.New(),
@@ -386,8 +397,21 @@ func NewSubscriberWithSigning(rabbitmqURL, serviceName string, signingConfig *Si
 		subscriber.verifier = NewHMAC(signingConfig)
 	}
 	for _, opt := range opts {
-		opt(subscriber)
+		opt.applySubscriber(subscriber)
 	}
+
+	conn, err := subscriber.dialing.dial(rabbitmqURL)
+	if err != nil {
+		return nil, err
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	subscriber.conn = conn
+	subscriber.channel = ch
 
 	// Update connection status
 	UpdateConnectionStatus(serviceName, "subscriber", true)

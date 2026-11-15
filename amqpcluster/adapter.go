@@ -2,6 +2,7 @@ package amqpcluster
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -91,6 +92,18 @@ type ClusterConfig struct {
 	// ConfirmTimeout bounds the wait for a confirmation; zero means five
 	// seconds.
 	ConfirmTimeout time.Duration
+
+	// TLS, when set, is used for every connection to every node (the node
+	// URLs are amqps://). Give the client certificate through
+	// GetClientCertificate, so that each reconnect asks for it again and a
+	// renewed certificate is picked up (vaultx.CertSource provides one).
+	TLS *tls.Config
+
+	// ExternalAuth authenticates with the TLS client certificate (SASL
+	// EXTERNAL) instead of the URL's user and password; the broker takes the
+	// user from the certificate, which needs its rabbitmq_auth_mechanism_ssl
+	// plugin.
+	ExternalAuth bool
 }
 
 // ClusterAdapter manages connections to multiple RabbitMQ nodes
@@ -164,7 +177,7 @@ func NewClusterAdapter(config ClusterConfig) (*ClusterAdapter, error) {
 		failureWindow: 5 * time.Minute,
 		recoveryTime:  30 * time.Second,
 		tombManager:   NewTombManager(fmt.Sprintf("cluster-adapter-%s", config.ServiceName)),
-		dial:          dialBroker,
+		dial:          dialerFor(config.TLS, config.ExternalAuth),
 	}
 
 	// Initialize nodes
