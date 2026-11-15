@@ -134,6 +134,27 @@ releases.
   reads the mark. Both subscribers obey a mark first.
   **Deprecated:** the word matching, used only for unmarked errors, will be
   removed in a later release; mark handler errors instead.
+- **Failed messages can be retried after a delay, a bounded number of times,
+  then dead-lettered.** *Opt-in.* A retryable failure was
+  `Nack(requeue=true)`, which put the message straight back: no delay, no
+  attempt count, no limit, so a failing dependency became a hot loop that
+  ended only when the queue TTL dead-lettered the message, and dead letters
+  went back through the topic exchange, where any `#` binding received them
+  too. The new `eventbus.RetryPolicy` (`Delays`, `MaxAttempts`), set as
+  `eventbus.SubscribeOptions.Retry` or `amqpcluster.SubscriptionOptions.Retry`,
+  republishes a retryable failure to a retry queue per delay
+  (`<queue>.retry.<delay>`, which dead-letters back into the queue when the
+  delay has passed) and dead-letters a permanent failure, or the last
+  attempt, to `<queue>.dlq` with the headers `x-svckit-attempt` and
+  `x-svckit-reason`. Retries and dead letters are routed by queue name and
+  never pass through the topic exchange. The original is acknowledged only
+  after its republish succeeds (`eventbus` republishes on a confirm-mode
+  channel; `amqpcluster` through its adapter, confirmed with
+  `PublisherConfirms`), so a crash in between duplicates a message rather
+  than losing it. Handlers read the attempt with the new
+  `eventbus.Attempt(ctx)`. Without a policy nothing changes. Enable it on a
+  new queue: the main queue's dead-letter arguments differ, and RabbitMQ
+  refuses to redeclare an existing queue with different arguments.
 - The integration tier runs one package at a time (`go test -tags integration
   -p 1`), in CI and in CONTRIBUTING: some tests restart a broker or make it
   drop every connection, which broke another package's tests running in

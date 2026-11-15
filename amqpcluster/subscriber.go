@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dobrevit/svckit/eventbus"
+	"github.com/dobrevit/svckit/internal/retry"
 	"github.com/dobrevit/svckit/logging"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -131,6 +132,16 @@ type SubscriptionOptions struct {
 	// eventbus.SubscribeOptions.QueueTTL.
 	TTL time.Duration
 
+	// Retry, when set, retries a message whose handler failed with a
+	// retryable error after a delay, up to MaxAttempts calls, and then
+	// dead-letters it, through retry queues and a DLQ routed by queue name;
+	// see eventbus.SubscribeOptions.Retry, which behaves the same. The
+	// republish goes through the adapter, so it is confirmed when the
+	// adapter has PublisherConfirms, and the original is acknowledged only
+	// after it. Enable it on a new queue: an existing one cannot be
+	// redeclared with the dead-letter arguments it needs.
+	Retry *eventbus.RetryPolicy
+
 	// AllowUnsigned lets unsigned messages reach the handler (with a Warn)
 	// even though the subscriber verifies signatures. Without it they are
 	// dead-lettered: the "signed" header is set by the sender, so trusting
@@ -144,6 +155,11 @@ type SubscriptionOptions struct {
 func (cs *ClusterSubscriber) SubscribeWithOptions(queueName, routingPattern string, handler eventbus.EventHandler, opts SubscriptionOptions) error {
 	if opts.AllowUnsigned && cs.signingRequired {
 		return errors.New("AllowUnsigned conflicts with a subscriber that requires signing")
+	}
+	if opts.Retry != nil {
+		if err := opts.Retry.Validate(); err != nil {
+			return err
+		}
 	}
 
 	// Setup queue infrastructure on all nodes
@@ -192,9 +208,13 @@ func (cs *ClusterSubscriber) setupQueue(queueName, routingPattern string, opts S
 		return fmt.Errorf("failed to declare DLQ: %w", err)
 	}
 
-	// Bind DLQ to exchange
-	if err := cs.cluster.BindQueue(dlqName, dlqName, cs.exchange, false, nil); err != nil {
-		return fmt.Errorf("failed to bind DLQ: %w", err)
+	// Bind DLQ to exchange. With a retry policy dead letters reach it
+	// through the default exchange instead, so it stays off the topic
+	// exchange.
+	if opts.Retry == nil {
+		if err := cs.cluster.BindQueue(dlqName, dlqName, cs.exchange, false, nil); err != nil {
+			return fmt.Errorf("failed to bind DLQ: %w", err)
+		}
 	}
 
 	// Setup main queue with DLQ configuration
@@ -210,6 +230,14 @@ func (cs *ClusterSubscriber) setupQueue(queueName, routingPattern string, opts S
 		queueArgs["x-message-ttl"] = int64(opts.TTL / time.Millisecond)
 	case opts.TTL == 0:
 		queueArgs["x-message-ttl"] = int64(5 * time.Minute / time.Millisecond) // Default 5 minutes
+	}
+	if opts.Retry != nil {
+		queueArgs = retry.MainQueueArgs(queueName, queueArgs)
+		for name, args := range retry.RetryQueues(queueName, *opts.Retry) {
+			if err := cs.cluster.DeclareQueue(name, opts.Durable, opts.AutoDelete, false, false, args); err != nil {
+				return fmt.Errorf("failed to declare retry queue %s: %w", name, err)
+			}
+		}
 	}
 
 	if err := cs.cluster.DeclareQueue(
@@ -282,7 +310,7 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 	}
 
 	// Create context for handler
-	ctx := context.Background()
+	ctx := eventbus.WithAttempt(context.Background(), retry.Attempt(delivery))
 	if userID, ok := delivery.Headers["user_id"]; ok {
 		if userIDStr, ok := userID.(string); ok && userIDStr != "" {
 			ctx = eventbus.WithUserID(ctx, userIDStr)
@@ -292,6 +320,10 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 	// Call the event handler
 	if err := handler.Handle(ctx, event); err != nil {
 		logging.Error("Handler failed to process event %s: %v", event.Type, err)
+		if !autoAck && opts.Retry != nil {
+			cs.retryOrDeadLetter(*opts.Retry, delivery, event, queueName, cs.isRetryableError(err))
+			return
+		}
 		if !autoAck {
 			if cs.isRetryableError(err) {
 				nack(delivery, true) // Requeue for retry
@@ -308,6 +340,26 @@ func (cs *ClusterSubscriber) handleMessage(queueName string, delivery amqp.Deliv
 	}
 }
 
+// retryOrDeadLetter sends a message whose handler failed to its retry queue
+// or the DLQ, as the policy says, and acknowledges it only once that publish
+// has succeeded (and, with PublisherConfirms, been confirmed). If the
+// publish fails the message is requeued, so it is handled again rather than
+// lost.
+func (cs *ClusterSubscriber) retryOrDeadLetter(policy eventbus.RetryPolicy, delivery amqp.Delivery, event *eventbus.BaseEvent, queueName string, retryable bool) {
+	target, msg := policy.Next(delivery, queueName, retryable)
+	if err := cs.cluster.PublishWithContext(context.Background(), "", target, true, false, msg); err != nil {
+		logging.Error("Failed to move event %s (ID: %s) to %s, requeueing it: %v", event.Type, event.ID, target, err)
+		nack(delivery, true)
+		return
+	}
+	if target == retry.DLQName(queueName) {
+		eventbus.RecordEventDLQ(event.Type, cs.serviceName, queueName, "processing_error")
+	} else {
+		eventbus.RecordEventRequeued(event.Type, cs.serviceName, queueName)
+	}
+	ack(delivery)
+}
+
 // isRetryableError decides whether a handler's error requeues the message:
 // what the handler said with eventbus.Retryable or eventbus.Permanent, or,
 // for an error with neither mark, guessedRetryable.
@@ -315,8 +367,8 @@ func (cs *ClusterSubscriber) isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if retry, decided := eventbus.IsRetryable(err); decided {
-		return retry
+	if retryable, decided := eventbus.IsRetryable(err); decided {
+		return retryable
 	}
 	return guessedRetryable(err)
 }

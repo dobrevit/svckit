@@ -21,16 +21,20 @@ var testSigning = &eventbus.SignatureConfig{
 
 // acknowledger records how a delivery was settled.
 type acknowledger struct {
-	mu      sync.Mutex
-	acked   bool
-	nacked  bool
-	requeue bool
+	mu       sync.Mutex
+	acked    bool
+	nacked   bool
+	requeue  bool
+	onSettle func(how string) // "ack" or "nack"
 }
 
 func (a *acknowledger) Ack(uint64, bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.acked = true
+	if a.onSettle != nil {
+		a.onSettle("ack")
+	}
 	return nil
 }
 
@@ -38,6 +42,9 @@ func (a *acknowledger) Nack(_ uint64, _ bool, requeue bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.nacked, a.requeue = true, requeue
+	if a.onSettle != nil {
+		a.onSettle("nack")
+	}
 	return nil
 }
 

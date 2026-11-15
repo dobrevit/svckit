@@ -10,6 +10,7 @@ type ctxKey int
 const (
 	keyUserID ctxKey = iota
 	keyBroadcast
+	keyAttempt
 )
 
 // WithUserID returns a context carrying the user a message was published on
@@ -23,6 +24,25 @@ func WithUserID(ctx context.Context, userID string) context.Context {
 func UserID(ctx context.Context) (string, bool) {
 	userID, ok := ctx.Value(keyUserID).(string)
 	return userID, ok && userID != ""
+}
+
+// WithAttempt returns a context carrying the attempt a handler call is: 1
+// for a message's first delivery, 2 for its first retry, and so on. The
+// subscribers set it; it is exported for tests and for other subscriber
+// implementations.
+func WithAttempt(ctx context.Context, attempt int) context.Context {
+	return context.WithValue(ctx, keyAttempt, attempt)
+}
+
+// Attempt returns which attempt at handling the message this is: 1 for the
+// first delivery, and with a RetryPolicy, 2 for the first retry and so on.
+// A handler can use it to log, or to give up early with Permanent. It is 1
+// when the subscriber set none.
+func Attempt(ctx context.Context) int {
+	if attempt, ok := ctx.Value(keyAttempt).(int); ok && attempt > 0 {
+		return attempt
+	}
+	return 1
 }
 
 // WithBroadcast returns a context carrying the broadcast envelope — the

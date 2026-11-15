@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dobrevit/svckit/internal/amqpconfirm"
+	"github.com/dobrevit/svckit/internal/retry"
 	"github.com/dobrevit/svckit/logging"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -292,7 +294,17 @@ type Subscriber struct {
 	serviceName    string
 	verifier       *EventVerifier
 	requireSigning bool
+
+	// retrier republishes failed messages for a RetryPolicy, on a channel of
+	// its own in confirm mode; created by the first subscription with one.
+	retrierMu sync.Mutex
+	retrier   *amqpconfirm.Publisher
 }
+
+// RetryPolicy retries a message whose handler failed with a retryable error
+// after a delay, a bounded number of times, and then dead-letters it. See
+// SubscribeOptions.Retry.
+type RetryPolicy = retry.Policy
 
 // NewSubscriber creates a new event subscriber
 func NewSubscriber(rabbitmqURL string) (*Subscriber, error) {
@@ -359,6 +371,23 @@ type SubscribeOptions struct {
 	// which can change without a redeclare. An existing queue keeps the
 	// arguments it was declared with until it is deleted.
 	QueueTTL time.Duration
+
+	// Retry, when set, retries a message whose handler failed with a
+	// retryable error (see Retryable) after the policy's delay instead of
+	// requeueing it at once, up to MaxAttempts calls, and then dead-letters
+	// it; a permanent failure is dead-lettered at once. The handler reads
+	// the attempt with Attempt(ctx). The subscriber declares a retry queue
+	// per distinct delay (<queue>.retry.<delay>) and routes retries and dead
+	// letters by queue name, so they never pass through the topic exchange
+	// and its other bindings. A dead letter carries the headers
+	// x-svckit-attempt and x-svckit-reason. The original is acknowledged
+	// only after its republish is confirmed, so a crash in between can
+	// duplicate a message but not lose it.
+	//
+	// The main queue's dead-letter arguments differ from those of a queue
+	// without a policy, and RabbitMQ refuses to redeclare a queue with
+	// different arguments: enable Retry on a new queue, not an existing one.
+	Retry *RetryPolicy
 }
 
 // NoQueueTTL as a QueueTTL (eventbus.SubscribeOptions,
@@ -396,6 +425,16 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 	if opts.AllowUnsigned && s.requireSigning {
 		return errors.New("AllowUnsigned conflicts with a subscriber that requires signing")
 	}
+	var retrier *amqpconfirm.Publisher
+	if opts.Retry != nil {
+		if err := opts.Retry.Validate(); err != nil {
+			return err
+		}
+		var err error
+		if retrier, err = s.retryPublisher(); err != nil {
+			return fmt.Errorf("open the retry channel: %w", err)
+		}
+	}
 
 	// Declare dead letter queue first
 	dlqName := queueName + ".dlq"
@@ -412,16 +451,28 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 	}
 
 	// Declare main queue with dead letter configuration
+	mainArgs := queueArguments(dlqName, opts.QueueTTL)
+	if opts.Retry != nil {
+		mainArgs = retry.MainQueueArgs(queueName, mainArgs)
+	}
 	q, err := s.channel.QueueDeclare(
 		queueName, // name
 		true,      // durable
 		false,     // delete when unused
 		false,     // exclusive
 		false,     // no-wait
-		queueArguments(dlqName, opts.QueueTTL), // arguments
+		mainArgs,  // arguments
 	)
 	if err != nil {
 		return err
+	}
+
+	if opts.Retry != nil {
+		for name, args := range retry.RetryQueues(queueName, *opts.Retry) {
+			if _, err := s.channel.QueueDeclare(name, true, false, false, false, args); err != nil {
+				return fmt.Errorf("declare retry queue %s: %w", name, err)
+			}
+		}
 	}
 
 	// Bind main queue to exchange
@@ -436,16 +487,20 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 		return err
 	}
 
-	// Bind dead letter queue to exchange
-	err = s.channel.QueueBind(
-		dlqName,         // queue name
-		dlqName,         // routing key
-		DefaultExchange, // exchange
-		false,
-		nil,
-	)
-	if err != nil {
-		return err
+	// Bind dead letter queue to exchange. With a retry policy dead letters
+	// reach it through the default exchange instead, so it stays off the
+	// topic exchange.
+	if opts.Retry == nil {
+		err = s.channel.QueueBind(
+			dlqName,         // queue name
+			dlqName,         // routing key
+			DefaultExchange, // exchange
+			false,
+			nil,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Set QoS to limit unacknowledged messages
@@ -513,12 +568,18 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
+				ctx = WithAttempt(ctx, retry.Attempt(d))
 
 				if err := handler.Handle(ctx, event); err != nil {
 					logging.Error("Error handling event %s: %v", event.Type, err)
 
 					// Record processing duration even for failures
 					EventProcessingDuration.WithLabelValues(event.Type, s.serviceName, queueName).Observe(time.Since(processingStart).Seconds())
+
+					if opts.Retry != nil {
+						s.retryOrDeadLetter(retrier, *opts.Retry, d, event, queueName, isRetryableError(err))
+						return
+					}
 
 					// Check if this is a retryable error
 					if isRetryableError(err) {
@@ -547,6 +608,50 @@ func (s *Subscriber) SubscribeWithOptions(queueName string, routingKey string, h
 
 	logging.Info("Subscribed to queue: %s with routing key: %s", queueName, routingKey)
 	return nil
+}
+
+// retryOrDeadLetter sends a message whose handler failed to its retry queue
+// or the DLQ, as the policy says, and acknowledges it only once that publish
+// is confirmed. If the publish fails the message is requeued, so it is
+// handled again rather than lost.
+func (s *Subscriber) retryOrDeadLetter(retrier *amqpconfirm.Publisher, policy RetryPolicy, d amqp.Delivery, event *BaseEvent, queueName string, retryable bool) {
+	target, msg := policy.Next(d, queueName, retryable)
+	if err := retrier.Publish(context.Background(), "", target, msg); err != nil {
+		logging.Error("Failed to move event %s (ID: %s) to %s, requeueing it: %v", event.Type, event.ID, target, err)
+		RecordEventRequeued(event.Type, s.serviceName, queueName)
+		RecordEventProcessed(event.Type, s.serviceName, queueName, "requeued")
+		nack(d, true)
+		return
+	}
+	if target == retry.DLQName(queueName) {
+		RecordEventDLQ(event.Type, s.serviceName, queueName, "processing_error")
+		RecordEventProcessed(event.Type, s.serviceName, queueName, "error")
+	} else {
+		RecordEventRequeued(event.Type, s.serviceName, queueName)
+		RecordEventProcessed(event.Type, s.serviceName, queueName, "retry_scheduled")
+	}
+	ack(d)
+}
+
+// retryPublisher returns the subscriber's retry publisher, opening its
+// channel the first time.
+func (s *Subscriber) retryPublisher() (*amqpconfirm.Publisher, error) {
+	s.retrierMu.Lock()
+	defer s.retrierMu.Unlock()
+	if s.retrier != nil {
+		return s.retrier, nil
+	}
+	ch, err := s.conn.Channel()
+	if err != nil {
+		return nil, err
+	}
+	retrier, err := amqpconfirm.New(amqpconfirm.AMQPChannel{Channel: ch}, 0)
+	if err != nil {
+		_ = ch.Close()
+		return nil, err
+	}
+	s.retrier = retrier
+	return retrier, nil
 }
 
 // isRetryableError decides whether a handler's error requeues the message:

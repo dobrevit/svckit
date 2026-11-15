@@ -5,7 +5,9 @@ package amqpcluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,4 +147,99 @@ func TestClusterPublisherSetsTheMessageIDToTheEventID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A ClusterSubscriber with a retry policy retries a failing message with the
+// policy's delays and then dead-letters it with the attempt count, without
+// the dead letter passing through the topic exchange.
+func TestClusterSubscriberRetryPolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	queue := fmt.Sprintf("svckit.it.cluster-retry.%d", time.Now().UnixNano())
+	tap := queue + ".tap"
+	withBroker(t, func(ch *amqp.Channel) {
+		if err := ch.ExchangeDeclare(eventbus.DefaultExchange, "topic", true, false, false, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ch.QueueDeclare(tap, false, false, false, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := ch.QueueBind(tap, "#", eventbus.DefaultExchange, false, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Cleanup(func() {
+		withBroker(t, func(ch *amqp.Channel) {
+			for _, q := range []string{queue, queue + ".dlq", queue + ".retry.200ms", queue + ".retry.400ms", tap} {
+				_, _ = ch.QueueDelete(q, false, false, false)
+			}
+		})
+	})
+
+	sub, err := NewClusterSubscriber([]string{testRabbitURL()}, "amqpcluster-it", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+
+	var mu sync.Mutex
+	var attempts []int
+	handler := handlerFunc(func(ctx context.Context, _ *eventbus.BaseEvent) error {
+		mu.Lock()
+		attempts = append(attempts, eventbus.Attempt(ctx))
+		mu.Unlock()
+		return eventbus.Retryable(errors.New("stock service down"))
+	})
+	policy := &eventbus.RetryPolicy{Delays: []time.Duration{200 * time.Millisecond, 400 * time.Millisecond}, MaxAttempts: 3}
+	if err := sub.SubscribeWithOptions(queue, queue, handler, SubscriptionOptions{Durable: false, PrefetchCount: 1, Retry: policy}); err != nil {
+		t.Fatalf("SubscribeWithOptions: %v", err)
+	}
+
+	body, _ := json.Marshal(eventbus.NewEvent(queue, "amqpcluster-it", nil))
+	withBroker(t, func(ch *amqp.Channel) {
+		if err := ch.Publish(eventbus.DefaultExchange, queue, false, false, amqp.Publishing{Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var msg amqp.Delivery
+		var ok bool
+		withBroker(t, func(ch *amqp.Channel) {
+			msg, ok, err = ch.Get(queue+".dlq", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+		if ok {
+			if got := msg.Headers["x-svckit-attempt"]; got != int32(3) {
+				t.Errorf("x-svckit-attempt = %#v, want 3", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the message never reached the DLQ")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mu.Lock()
+	got := append([]int(nil), attempts...)
+	mu.Unlock()
+	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("attempts = %v, want [1 2 3]", got)
+	}
+
+	withBroker(t, func(ch *amqp.Channel) {
+		state, err := ch.QueueDeclarePassive(tap, false, false, false, false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Messages != 1 {
+			t.Errorf("the # tap holds %d messages, want only the original", state.Messages)
+		}
+	})
 }
