@@ -92,13 +92,15 @@ router.Use(ginx.LoggingMiddleware())
 | [`buildinfo`](buildinfo) | Version metadata injected at build time via ldflags |
 | [`debug`](debug) | pprof endpoints behind an environment gate |
 | [`env`](env) | Typed environment-variable readers with defaults |
-| [`eventbus`](eventbus) | Signed publish/subscribe, broadcast, dead-letter handling and a handler dispatcher |
+| [`eventbus`](eventbus) | Publish/subscribe with HMAC or certificate signatures (`x509sig`), sealed payloads (`seal`), publisher confirms, delayed retries, dead-letter handling and a handler dispatcher |
 | [`health`](health) | Health and readiness reporting over `*sql.DB` and the event bus |
 | [`httpclient`](httpclient) | HTTP client with circuit breaker, retries, tracing and metrics |
 | [`httpx`](httpx) | Response envelopes, bounded JSON decoding, clamped pagination |
+| [`inbox`](inbox) | Idempotent message handling: claim a message id in the handling transaction |
 | [`lifecycle`](lifecycle) | Goroutine and server lifecycle management with graceful shutdown |
 | [`logging`](logging) | `log/slog` handlers: human-readable lines or JSON, configured from the environment |
 | [`middleware`](middleware) | CORS, tracing, rate limiting, request logging, Prometheus metrics, service-key auth |
+| [`outbox`](outbox) | Transactional outbox: store a message with the change it announces, and a relay that publishes it |
 | [`pgcluster`](pgcluster) | Postgres cluster with writer detection, read balancing, health checks and a circuit breaker |
 | [`rediscluster`](rediscluster) | Redis cluster client with health checking and load balancing |
 | [`secrets`](secrets) | Secret resolution over environment variables, Vault or Kubernetes Secrets |
